@@ -23,10 +23,11 @@ import (
 
 // Config configures the AckTier Control & Relay Server.
 type Config struct {
-	AdminToken string
-	PublicHost string // Hostname or IP advertised in RelayNode
-	RelayAddr  string // host:port advertised for TCP/HTTP relay
-	STUNAddr   string // host:port advertised for UDP STUN
+	AdminToken  string
+	PublicHost  string // Hostname or IP advertised in RelayNode
+	RelayAddr   string // host:port advertised for TCP/HTTP relay
+	STUNAddr    string // Primary UDP STUN address host:port
+	STUNAltAddr string // Secondary UDP STUN address host:port for Cone/Symmetric classification
 }
 
 type subscriber struct {
@@ -172,11 +173,12 @@ func (s *Server) buildNetMapFor(selfID types.NodeID) (types.NetMap, bool) {
 	var relays []types.RelayNode
 	if s.cfg.RelayAddr != "" {
 		relays = append(relays, types.RelayNode{
-			ID:        "default",
-			Region:    "primary",
-			Host:      s.cfg.PublicHost,
-			RelayAddr: s.cfg.RelayAddr,
-			STUNAddr:  s.cfg.STUNAddr,
+			ID:          "default",
+			Region:      "primary",
+			Host:        s.cfg.PublicHost,
+			RelayAddr:   s.cfg.RelayAddr,
+			STUNAddr:    s.cfg.STUNAddr,
+			STUNAltAddr: s.cfg.STUNAltAddr,
 		})
 	}
 

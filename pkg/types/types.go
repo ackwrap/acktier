@@ -67,12 +67,13 @@ type FilterRule struct {
 
 // RelayNode describes an official or self-hosted relay & STUN server.
 type RelayNode struct {
-	ID        string `json:"id"`
-	Region    string `json:"region"`
-	Host      string `json:"host"`
-	RelayAddr string `json:"relayAddr"` // TCP/HTTP/TLS relay address host:port
-	STUNAddr  string `json:"stunAddr"`  // UDP STUN address host:port
-	UseTLS    bool   `json:"useTLS,omitempty"`
+	ID          string `json:"id"`
+	Region      string `json:"region"`
+	Host        string `json:"host"`
+	RelayAddr   string `json:"relayAddr"`             // TCP/HTTP/TLS relay address host:port
+	STUNAddr    string `json:"stunAddr"`              // Primary UDP STUN address host:port
+	STUNAltAddr string `json:"stunAltAddr,omitempty"` // Secondary UDP STUN port for Cone vs Symmetric NAT detection
+	UseTLS      bool   `json:"useTLS,omitempty"`
 }
 
 // DNSConfig holds MagicDNS and split-DNS settings distributed by the control server.

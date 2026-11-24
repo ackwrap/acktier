@@ -26,6 +26,7 @@ const (
 	PacketData          PacketType = 0x03
 	PacketPing          PacketType = 0x04
 	PacketPong          PacketType = 0x05
+	PacketPunchCoord    PacketType = 0x06 // CallMeMaybe synchronized hole-punch request
 
 	PacketRelayBind    PacketType = 0x10
 	PacketRelayBindAck PacketType = 0x11
@@ -148,6 +149,85 @@ func DecodeProbePacket(pkt []byte) (pktType PacketType, sender types.PublicKey, 
 	}
 	observedAddr = string(body[49 : 49+addrLen])
 	return pType, sender, probeID, txNano, observedAddr, nil
+}
+
+// EncodePunchCoord encodes a CallMeMaybe hole-punch coordination message carrying fresh STUN endpoints & NAT hints.
+// Wire layout: Header(4, flags=isReply) + SenderPub(32) + NATKind(1) + PortStep(2) + EpCount(1) + [ProtoLen(1)+Proto + AddrLen(1)+Addr]...
+func EncodePunchCoord(sender types.PublicKey, isReply bool, natKind byte, portStep int16, endpoints []types.Endpoint) []byte {
+	if len(endpoints) > 16 {
+		endpoints = endpoints[:16]
+	}
+	size := HeaderMinSize + 32 + 1 + 2 + 1
+	for _, ep := range endpoints {
+		size += 1 + len(ep.Proto) + 1 + len(ep.Addr)
+	}
+	flags := byte(0)
+	if isReply {
+		flags = 1
+	}
+	out := make([]byte, size)
+	WriteHeader(out, PacketPunchCoord, flags)
+	copy(out[4:36], sender[:])
+	out[36] = natKind
+	binary.BigEndian.PutUint16(out[37:39], uint16(portStep))
+	out[39] = byte(len(endpoints))
+	off := 40
+	for _, ep := range endpoints {
+		pStr := string(ep.Proto)
+		if len(pStr) > 16 {
+			pStr = pStr[:16]
+		}
+		aStr := ep.Addr
+		if len(aStr) > 128 {
+			aStr = aStr[:128]
+		}
+		out[off] = byte(len(pStr))
+		off++
+		copy(out[off:], pStr)
+		off += len(pStr)
+		out[off] = byte(len(aStr))
+		off++
+		copy(out[off:], aStr)
+		off += len(aStr)
+	}
+	return out[:off]
+}
+
+func DecodePunchCoord(pkt []byte) (sender types.PublicKey, isReply bool, natKind byte, portStep int16, endpoints []types.Endpoint, err error) {
+	pType, flags, body, err := ParseHeader(pkt)
+	if err != nil {
+		return sender, false, 0, 0, nil, err
+	}
+	if pType != PacketPunchCoord || len(body) < 36 {
+		return sender, false, 0, 0, nil, ErrShortPacket
+	}
+	copy(sender[:], body[0:32])
+	natKind = body[32]
+	portStep = int16(binary.BigEndian.Uint16(body[33:35]))
+	count := int(body[35])
+	off := 36
+	endpoints = make([]types.Endpoint, 0, count)
+	for i := 0; i < count; i++ {
+		if off >= len(body) {
+			return sender, false, 0, 0, nil, ErrShortPacket
+		}
+		pLen := int(body[off])
+		off++
+		if off+pLen >= len(body) {
+			return sender, false, 0, 0, nil, ErrShortPacket
+		}
+		proto := types.TransportProto(body[off : off+pLen])
+		off += pLen
+		aLen := int(body[off])
+		off++
+		if off+aLen > len(body) {
+			return sender, false, 0, 0, nil, ErrShortPacket
+		}
+		addr := string(body[off : off+aLen])
+		off += aLen
+		endpoints = append(endpoints, types.Endpoint{Proto: proto, Addr: addr})
+	}
+	return sender, flags == 1, natKind, portStep, endpoints, nil
 }
 
 // RelayBindPacket binds a client's NodeKey on a stream connection to a Relay server.

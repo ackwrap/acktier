@@ -40,6 +40,8 @@ func main() {
 		runDown(apiBase)
 	case "status":
 		runStatus(apiBase, args)
+	case "netcheck":
+		runNetCheck(apiBase, args)
 	case "ping":
 		runPing(apiBase, args)
 	case "key":
@@ -57,6 +59,7 @@ Usage:
   acktier up --server <url> [--auth-key <key>] [--hostname <name>] [--advertise-routes <cidr,...>]
   acktier down
   acktier status [--json]
+  acktier netcheck [--json]
   acktier ping <peer-name-or-ip> [-c <count>]
   acktier key create --server <url> --admin-token <token> [--reusable] [--label <name>]`)
 }
@@ -136,7 +139,7 @@ func runStatus(apiBase string, args []string) {
 		return
 	}
 
-	fmt.Printf("State: %s | TUN: %s | Relay Connected: %v\n", st.State, st.TUNName, st.RelayConnected)
+	fmt.Printf("State: %s | TUN: %s | NAT: %s | Relay Connected: %v\n", st.State, st.TUNName, st.NATType, st.RelayConnected)
 	if st.IPv4 != "" {
 		fmt.Printf("Self : %-15s %-20s (%s)\n\n", st.IPv4, st.SelfName, st.SelfNodeKey)
 	}
@@ -154,7 +157,7 @@ func runStatus(apiBase string, args []string) {
 		}
 		pathStr := p.ActivePath
 		if p.DirectAddr != "" {
-			pathStr = fmt.Sprintf("direct (%s)", p.DirectAddr)
+			pathStr = fmt.Sprintf("%s (%s)", p.ActivePath, p.DirectAddr)
 		}
 		rttStr := "-"
 		if p.RTTMillis > 0 {
@@ -164,6 +167,46 @@ func runStatus(apiBase string, args []string) {
 			p.IPv4, p.Name, p.OS, onlineStr, pathStr, rttStr, p.RxBytes, p.TxBytes)
 	}
 	_ = tw.Flush()
+}
+
+func runNetCheck(apiBase string, args []string) {
+	fs := flag.NewFlagSet("netcheck", flag.ExitOnError)
+	apiFlag := fs.String("api", apiBase, "LocalAPI base URL")
+	asJSON := fs.Bool("json", false, "Output raw JSON")
+	_ = fs.Parse(args)
+
+	resp, err := http.Get(strings.TrimRight(*apiFlag, "/") + "/local/v1/netcheck")
+	if err != nil {
+		fatalf("cannot reach acktierd (%s): %v", *apiFlag, err)
+	}
+	defer resp.Body.Close()
+
+	var rep engine.NetCheckReport
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		fatalf("decode netcheck: %v", err)
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(rep)
+		return
+	}
+
+	fmt.Println("AckTier NetCheck Report")
+	fmt.Println("------------------------------------------------")
+	fmt.Printf("  NAT Type          : %s\n", rep.NAT.NATType)
+	if rep.NAT.PublicUDPAddr != "" {
+		fmt.Printf("  STUN Public UDP   : %s (RTT %.2f ms)\n", rep.NAT.PublicUDPAddr, rep.NAT.STUNLatencyMs)
+	}
+	if rep.NAT.AltPublicUDPAddr != "" {
+		fmt.Printf("  STUN Alt UDP      : %s (Port Step %+d)\n", rep.NAT.AltPublicUDPAddr, rep.NAT.PortStep)
+	}
+	if rep.NAT.UPnPMappedUDP != "" || rep.NAT.UPnPMappedTCP != "" {
+		fmt.Printf("  UPnP / NAT-PMP    : UDP=%s TCP=%s\n", rep.NAT.UPnPMappedUDP, rep.NAT.UPnPMappedTCP)
+	}
+	fmt.Printf("  Relay Connected   : %v\n", rep.RelayConnected)
+	fmt.Printf("  Bound Transports  : %v\n", rep.LocalTransports)
+	fmt.Printf("  Advertised Cand.  : %d endpoints\n", rep.CandidateCount)
 }
 
 func runPing(apiBase string, args []string) {

@@ -23,6 +23,7 @@ func NewServer(eng *engine.Engine) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /local/v1/status", s.handleStatus)
+	mux.HandleFunc("GET /local/v1/netcheck", s.handleNetCheck)
 	mux.HandleFunc("POST /local/v1/up", s.handleUp)
 	mux.HandleFunc("POST /local/v1/down", s.handleDown)
 	mux.HandleFunc("POST /local/v1/ping", s.handlePing)
@@ -31,6 +32,12 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.eng.Status())
+}
+
+func (s *Server) handleNetCheck(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	writeJSON(w, http.StatusOK, s.eng.NetCheck(ctx))
 }
 
 func (s *Server) handleUp(w http.ResponseWriter, r *http.Request) {

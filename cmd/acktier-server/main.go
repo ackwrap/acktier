@@ -20,11 +20,12 @@ import (
 
 func main() {
 	var (
-		listenAddr = flag.String("listen", "0.0.0.0:8080", "HTTP control & relay listen address")
-		stunAddr   = flag.String("stun", "0.0.0.0:3478", "UDP STUN listen address (empty to disable)")
-		publicHost = flag.String("public-host", "127.0.0.1", "Public host/IP advertised to clients for Relay & STUN")
-		dataPath   = flag.String("data", "./data/server-state.json", "Path to persistent server state file")
-		adminToken = flag.String("admin-token", os.Getenv("ACKTIER_ADMIN_TOKEN"), "Admin API bearer token (auto-generated if empty)")
+		listenAddr  = flag.String("listen", "0.0.0.0:8080", "HTTP control & relay listen address")
+		stunAddr    = flag.String("stun", "0.0.0.0:3478", "Primary UDP STUN listen address (empty to disable)")
+		stunAltAddr = flag.String("stun-alt", "0.0.0.0:3479", "Secondary UDP STUN listen address for NAT type detection")
+		publicHost  = flag.String("public-host", "127.0.0.1", "Public host/IP advertised to clients for Relay & STUN")
+		dataPath    = flag.String("data", "./data/server-state.json", "Path to persistent server state file")
+		adminToken  = flag.String("admin-token", os.Getenv("ACKTIER_ADMIN_TOKEN"), "Admin API bearer token (auto-generated if empty)")
 	)
 	flag.Parse()
 
@@ -39,7 +40,6 @@ func main() {
 		log.Fatalf("failed to open store: %v", err)
 	}
 
-	// Ensure at least one reusable bootstrap PreAuthKey exists on fresh setup
 	var bootstrapKey string
 	if len(st.ListPreAuthKeys()) == 0 {
 		pak, err := st.CreatePreAuthKey("bootstrap-default", true, false, nil, 30*24*time.Hour)
@@ -54,24 +54,34 @@ func main() {
 	}
 	advRelayAddr := net.JoinHostPort(*publicHost, httpPort)
 
-	var advSTUNAddr string
-	var stunConn net.PacketConn
+	var advSTUNAddr, advSTUNAltAddr string
+	var stunConn, stunAltConn net.PacketConn
 	if *stunAddr != "" {
 		uConn, err := net.ListenPacket("udp", *stunAddr)
 		if err != nil {
-			log.Fatalf("failed to bind STUN UDP %s: %v", *stunAddr, err)
+			log.Fatalf("failed to bind primary STUN UDP %s: %v", *stunAddr, err)
 		}
 		stunConn = uConn
 		_, sPort, _ := net.SplitHostPort(uConn.LocalAddr().String())
 		advSTUNAddr = net.JoinHostPort(*publicHost, sPort)
 		go relay.ServeSTUNLoop(stunConn)
 	}
+	if *stunAltAddr != "" {
+		uAlt, err := net.ListenPacket("udp", *stunAltAddr)
+		if err == nil {
+			stunAltConn = uAlt
+			_, sAltPort, _ := net.SplitHostPort(uAlt.LocalAddr().String())
+			advSTUNAltAddr = net.JoinHostPort(*publicHost, sAltPort)
+			go relay.ServeSTUNLoop(stunAltConn)
+		}
+	}
 
 	ctrl := control.NewServer(control.Config{
-		AdminToken: *adminToken,
-		PublicHost: *publicHost,
-		RelayAddr:  advRelayAddr,
-		STUNAddr:   advSTUNAddr,
+		AdminToken:  *adminToken,
+		PublicHost:  *publicHost,
+		RelayAddr:   advRelayAddr,
+		STUNAddr:    advSTUNAddr,
+		STUNAltAddr: advSTUNAltAddr,
 	}, st)
 
 	httpSrv := &http.Server{
@@ -84,7 +94,7 @@ func main() {
 	fmt.Printf(" AckTier Control & Relay Server\n")
 	fmt.Printf(" Listen HTTP/Relay : %s (advertised: %s)\n", *listenAddr, advRelayAddr)
 	if advSTUNAddr != "" {
-		fmt.Printf(" Listen UDP STUN   : %s (advertised: %s)\n", *stunAddr, advSTUNAddr)
+		fmt.Printf(" Listen UDP STUN   : %s / alt %s\n", advSTUNAddr, advSTUNAltAddr)
 	}
 	fmt.Printf(" Admin Token       : %s\n", *adminToken)
 	if bootstrapKey != "" {
@@ -104,6 +114,9 @@ func main() {
 	log.Println("shutting down acktier-server...")
 	if stunConn != nil {
 		_ = stunConn.Close()
+	}
+	if stunAltConn != nil {
+		_ = stunAltConn.Close()
 	}
 	_ = httpSrv.Close()
 }
