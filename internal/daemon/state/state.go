@@ -19,6 +19,7 @@ type ConfigState struct {
 	NodeToken        string           `json:"nodeToken,omitempty"`
 	Hostname         string           `json:"hostname,omitempty"`
 	AdvertisedRoutes []netip.Prefix   `json:"advertisedRoutes,omitempty"`
+	ExitNode         string           `json:"exitNode,omitempty"`
 	CanRelay         bool             `json:"canRelay,omitempty"`
 	WantRunning      bool             `json:"wantRunning,omitempty"`
 }

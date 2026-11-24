@@ -31,6 +31,7 @@ func main() {
 		enableLANDis = flag.Bool("lan-discovery", true, "Enable L2 LAN peer discovery beacons")
 		tunMode      = flag.String("tun", "auto", "TUN device mode: auto | os | memory")
 		ifName       = flag.String("ifname", "", "Custom virtual network interface name")
+		canRelay     = flag.Bool("can-relay", false, "Allow this node to act as a peer mesh ciphertext relay")
 		serverURL    = flag.String("server", "", "Optional Control Server URL for immediate auto-up")
 		authKey      = flag.String("auth-key", "", "Optional PreAuthKey for unattended registration")
 	)
@@ -129,6 +130,7 @@ func main() {
 			nm, err := eng.Up(ctx, engine.UpRequest{
 				ServerURL: *serverURL,
 				AuthKey:   *authKey,
+				CanRelay:  *canRelay,
 			})
 			if err != nil {
 				log.Printf("[acktierd] auto-up failed: %v", err)

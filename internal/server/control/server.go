@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/acktier/acktier/internal/server/acl"
 	"github.com/acktier/acktier/internal/server/ipam"
 	"github.com/acktier/acktier/internal/server/relay"
 	"github.com/acktier/acktier/internal/server/store"
@@ -102,6 +103,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/admin/keys", s.requireAdmin(s.handleAdminListKeys))
 	mux.HandleFunc("POST /api/v1/admin/keys", s.requireAdmin(s.handleAdminCreateKey))
 	mux.HandleFunc("DELETE /api/v1/admin/keys/{id}", s.requireAdmin(s.handleAdminRevokeKey))
+	mux.HandleFunc("GET /api/v1/admin/acl", s.requireAdmin(s.handleAdminGetACL))
+	mux.HandleFunc("PUT /api/v1/admin/acl", s.requireAdmin(s.handleAdminPutACL))
+	mux.HandleFunc("PUT /api/v1/admin/dns", s.requireAdmin(s.handleAdminPutDNS))
 
 	return mux
 }
@@ -155,9 +159,11 @@ func (s *Server) buildNetMapFor(selfID types.NodeID) (types.NetMap, bool) {
 	var self types.PeerNode
 	found := false
 	peers := make([]types.PeerNode, 0, len(all))
+	allPeerNodes := make([]types.PeerNode, 0, len(all))
 	for _, sn := range all {
 		n := sn.Node
 		n.AllowedIPs = buildAllowedIPs(n)
+		allPeerNodes = append(allPeerNodes, n)
 		if n.ID == selfID {
 			self = n
 			found = true
@@ -169,7 +175,12 @@ func (s *Server) buildNetMapFor(selfID types.NodeID) (types.NetMap, bool) {
 		return types.NetMap{}, false
 	}
 
-	dnsCfg, rules := s.store.GetDNSAndFilters()
+	dnsCfg, staticRules := s.store.GetDNSAndFilters()
+	pol := s.store.GetACLPolicy()
+	compiledRules := acl.CompileForNode(pol, self, allPeerNodes)
+	if len(compiledRules) > 0 {
+		staticRules = compiledRules
+	}
 	var relays []types.RelayNode
 	if s.cfg.RelayAddr != "" {
 		relays = append(relays, types.RelayNode{
@@ -187,7 +198,7 @@ func (s *Server) buildNetMapFor(selfID types.NodeID) (types.NetMap, bool) {
 		Self:         self,
 		Peers:        peers,
 		Relays:       relays,
-		PacketFilter: rules,
+		PacketFilter: staticRules,
 		DNS:          dnsCfg,
 		UpdatedAt:    time.Now().UTC(),
 	}, true
@@ -344,9 +355,13 @@ func (s *Server) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
 	changed := !sn.Node.Online ||
 		sn.Node.CanRelay != req.CanRelay ||
 		sn.Node.PreferredRelayID != req.PreferredRelayID ||
-		!endpointsEqual(sn.Node.Endpoints, req.Endpoints)
+		!endpointsEqual(sn.Node.Endpoints, req.Endpoints) ||
+		!linksMeaningfullyChanged(sn.Node.Links, req.Links)
 
 	sn.Node.Endpoints = req.Endpoints
+	if req.Links != nil {
+		sn.Node.Links = req.Links
+	}
 	if req.AdvertisedRoutes != nil {
 		sn.Node.AdvertisedRoutes = req.AdvertisedRoutes
 	}
@@ -368,6 +383,34 @@ func endpointsEqual(a, b []types.Endpoint) bool {
 	}
 	for i := range a {
 		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// linksMeaningfullyChanged returns false when neighbor sets match and RTTs differ by < 25% (avoids broadcast storms).
+func linksMeaningfullyChanged(oldLinks, newLinks []types.PeerLink) bool {
+	if newLinks == nil {
+		return true
+	}
+	if len(oldLinks) != len(newLinks) {
+		return false
+	}
+	oldMap := make(map[types.PublicKey]float64, len(oldLinks))
+	for _, l := range oldLinks {
+		oldMap[l.Target] = l.RTTMillis
+	}
+	for _, nl := range newLinks {
+		oldRTT, ok := oldMap[nl.Target]
+		if !ok {
+			return false
+		}
+		diff := nl.RTTMillis - oldRTT
+		if diff < 0 {
+			diff = -diff
+		}
+		if oldRTT > 0 && diff/oldRTT > 0.25 && diff > 2.0 {
 			return false
 		}
 	}
@@ -618,6 +661,45 @@ func (s *Server) handleAdminRevokeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": id})
+}
+
+func (s *Server) handleAdminGetACL(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.GetACLPolicy())
+}
+
+func (s *Server) handleAdminPutACL(w http.ResponseWriter, r *http.Request) {
+	var pol types.ACLPolicy
+	if err := json.NewDecoder(r.Body).Decode(&pol); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid acl policy json")
+		return
+	}
+	if err := acl.Validate(pol); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.SetACLPolicy(pol); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.broadcastTopologyChange()
+	writeJSON(w, http.StatusOK, pol)
+}
+
+func (s *Server) handleAdminPutDNS(w http.ResponseWriter, r *http.Request) {
+	var cfg types.DNSConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid dns config json")
+		return
+	}
+	if cfg.MagicDNSSuffix == "" {
+		cfg.MagicDNSSuffix = "ack.internal"
+	}
+	if err := s.store.SetDNSConfig(cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.broadcastTopologyChange()
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

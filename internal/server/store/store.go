@@ -27,11 +27,12 @@ type StoredNode struct {
 }
 
 type snapshot struct {
-	NextNodeID  types.NodeID              `json:"nextNodeId"`
+	NextNodeID  types.NodeID                `json:"nextNodeId"`
 	Nodes       map[types.NodeID]StoredNode `json:"nodes"`
 	PreAuthKeys map[string]types.PreAuthKey `json:"preAuthKeys"`
-	FilterRules []types.FilterRule        `json:"filterRules"`
-	DNS         types.DNSConfig           `json:"dns"`
+	ACLPolicy   types.ACLPolicy             `json:"aclPolicy"`
+	FilterRules []types.FilterRule          `json:"filterRules,omitempty"`
+	DNS         types.DNSConfig             `json:"dns"`
 }
 
 // FileStore provides concurrency-safe persistent storage backed by atomic JSON snapshots.
@@ -246,4 +247,24 @@ func (s *FileStore) GetDNSAndFilters() (types.DNSConfig, []types.FilterRule) {
 	rules := make([]types.FilterRule, len(s.data.FilterRules))
 	copy(rules, s.data.FilterRules)
 	return s.data.DNS, rules
+}
+
+func (s *FileStore) GetACLPolicy() types.ACLPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data.ACLPolicy
+}
+
+func (s *FileStore) SetACLPolicy(pol types.ACLPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.ACLPolicy = pol
+	return s.saveLocked()
+}
+
+func (s *FileStore) SetDNSConfig(dnsCfg types.DNSConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.DNS = dnsCfg
+	return s.saveLocked()
 }

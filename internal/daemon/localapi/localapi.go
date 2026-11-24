@@ -23,7 +23,10 @@ func NewServer(eng *engine.Engine) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /local/v1/status", s.handleStatus)
+	mux.HandleFunc("GET /local/v1/mesh", s.handleMesh)
 	mux.HandleFunc("GET /local/v1/netcheck", s.handleNetCheck)
+	mux.HandleFunc("GET /local/v1/dns", s.handleDNSLookup)
+	mux.HandleFunc("POST /local/v1/exit-node", s.handleSetExitNode)
 	mux.HandleFunc("POST /local/v1/up", s.handleUp)
 	mux.HandleFunc("POST /local/v1/down", s.handleDown)
 	mux.HandleFunc("POST /local/v1/ping", s.handlePing)
@@ -32,6 +35,39 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.eng.Status())
+}
+
+func (s *Server) handleMesh(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.eng.MeshStatus())
+}
+
+func (s *Server) handleDNSLookup(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	v4, v6, fqdn, ok := s.eng.LookupDNS(name)
+	if !ok {
+		writeError(w, http.StatusNotFound, "host not found in MagicDNS")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"fqdn": fqdn,
+		"ipv4": v4,
+		"ipv6": v6,
+	})
+}
+
+func (s *Server) handleSetExitNode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ExitNode string `json:"exitNode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := s.eng.SetExitNode(req.ExitNode); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"exitNode": req.ExitNode})
 }
 
 func (s *Server) handleNetCheck(w http.ResponseWriter, r *http.Request) {

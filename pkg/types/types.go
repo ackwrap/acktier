@@ -25,6 +25,13 @@ type Endpoint struct {
 	IsLAN bool           `json:"isLan,omitempty"`
 }
 
+// PeerLink reports a verified direct L4/L7 link and smoothed RTT from a node to a neighbor peer.
+type PeerLink struct {
+	Target    PublicKey      `json:"target"`
+	RTTMillis float64        `json:"rttMillis"`
+	Proto     TransportProto `json:"proto,omitempty"`
+}
+
 // PeerNode represents a device in the AckTier overlay network.
 type PeerNode struct {
 	ID               NodeID         `json:"id"`
@@ -36,6 +43,7 @@ type PeerNode struct {
 	IPv4             netip.Addr     `json:"ipv4"`
 	IPv6             netip.Addr     `json:"ipv6"`
 	Endpoints        []Endpoint     `json:"endpoints,omitempty"`
+	Links            []PeerLink     `json:"links,omitempty"`
 	AllowedIPs       []netip.Prefix `json:"allowedIPs,omitempty"`
 	AdvertisedRoutes []netip.Prefix `json:"advertisedRoutes,omitempty"`
 	ApprovedRoutes   []netip.Prefix `json:"approvedRoutes,omitempty"`
@@ -63,6 +71,22 @@ type FilterRule struct {
 	IPProto      uint8          `json:"ipProto,omitempty"` // 0=any, 1=ICMP, 6=TCP, 17=UDP, 58=ICMPv6
 	DstPortStart uint16         `json:"dstPortStart,omitempty"`
 	DstPortEnd   uint16         `json:"dstPortEnd,omitempty"`
+}
+
+// ACLGrantEntry defines one human-readable access rule in the central Zero-Trust ACL policy.
+// Example: Action="accept", Src=["tag:dev", "alpha-node"], Proto="tcp", Dst=["tag:prod:80,443", "192.168.10.0/24:8000-9000"]
+type ACLGrantEntry struct {
+	Action string   `json:"action"`          // "accept" | "drop" (default "accept")
+	Src    []string `json:"src"`             // "*", "tag:name", "group:name", node-name, IP, or CIDR
+	Proto  string   `json:"proto,omitempty"` // "", "*", "tcp", "udp", "icmp"
+	Dst    []string `json:"dst"`             // "<selector>:<port|start-end|*>"
+}
+
+// ACLPolicy represents the centralized Zero-Trust Access Control Policy managed on acktier-server.
+type ACLPolicy struct {
+	Groups map[string][]string `json:"groups,omitempty"` // "group:ops": ["admin-pc", "tag:admin"]
+	Hosts  map[string]string   `json:"hosts,omitempty"`  // "corp-lan": "192.168.10.0/24"
+	ACLs   []ACLGrantEntry     `json:"acls"`             // If empty, default allow-all within overlay
 }
 
 // RelayNode describes an official or self-hosted relay & STUN server.
@@ -127,10 +151,11 @@ type RegisterResponse struct {
 	NetMap    NetMap `json:"netMap"`
 }
 
-// HeartbeatRequest updates dynamic endpoint and routing state of an authenticated node.
+// HeartbeatRequest updates dynamic endpoint, link-state RTT, and routing state of an authenticated node.
 type HeartbeatRequest struct {
 	NodeKey          PublicKey      `json:"nodeKey"`
 	Endpoints        []Endpoint     `json:"endpoints,omitempty"`
+	Links            []PeerLink     `json:"links,omitempty"`
 	AdvertisedRoutes []netip.Prefix `json:"advertisedRoutes,omitempty"`
 	CanRelay         bool           `json:"canRelay,omitempty"`
 	PreferredRelayID string         `json:"preferredRelayId,omitempty"`
