@@ -4,11 +4,13 @@
 
 完整架构设计与分阶段路线图详见 [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md)。
 
-## 核心组件
+## 核心组件与公开 Go SDK
 
-- `cmd/acktier-server`：中心控制端（设备鉴权、IPAM 地址池、NetMap 实时增量推送、内置 STUN 与加密帧 Relay 兜底服务、管理 API）
-- `cmd/acktierd`：客户端后台守护进程（跨平台虚拟网卡 TUN、X25519 + AEAD 端到端加密、UDP 直连与智能中继路由、LocalAPI 服务）
-- `cmd/acktier`：跨平台命令行管理工具（管理本地 `acktierd` 状态、节点列表、组网启停与控制端密钥管理）
+- `pkg/acknet`：**免管理员权限/免网卡驱动的应用内嵌虚拟网络 SDK**（对标 Tailscale `tsnet`，提供标准 `Listen`、`Dial`、`ListenPacket`、`HTTPClient`、`ListenSOCKS5`）
+- `pkg/client`：**客户端完整节点嵌入、守护进程控制 (`DaemonClient`) 与管理端 (`AdminClient`) Go SDK**（详见 [docs/SDK_GUIDE.md](docs/SDK_GUIDE.md)）
+- `cmd/acktier-server`：中心控制端（设备鉴权、IPAM 地址池、NetMap 实时增量推送、零信任 ACL 编译器、内置双端口 STUN 与加密帧 Relay 服务）
+- `cmd/acktierd`：客户端后台守护进程（跨平台虚拟网卡 TUN、X25519 + AES-256-GCM 端到端加密、UDP/TCP/QUIC/WSS 多协议传输、对等多跳网格中继、MagicDNS、Subnet Router / Exit Node）
+- `cmd/acktier`：跨平台命令行管理工具（`up`、`down`、`status`、`mesh`、`netcheck`、`dns`、`exit-node`、`ping`、`route`、`acl`）
 
 ## 快速开始 (开发预览)
 

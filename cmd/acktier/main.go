@@ -1,20 +1,17 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"net/netip"
 	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/engine"
-	"github.com/acktier/acktier/internal/daemon/localapi"
+	"github.com/acktier/acktier/pkg/client"
 	"github.com/acktier/acktier/pkg/types"
 )
 
@@ -26,9 +23,8 @@ func main() {
 
 	apiBase := os.Getenv("ACKTIER_API")
 	if apiBase == "" {
-		apiBase = "http://" + localapi.DefaultAddr
+		apiBase = client.DefaultLocalAPIURL
 	}
-	apiBase = strings.TrimRight(apiBase, "/")
 
 	cmd := os.Args[1]
 	args := os.Args[2:]
@@ -105,7 +101,8 @@ func runUp(apiBase string, args []string) {
 		routes = append(routes, netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0"))
 	}
 
-	reqBody, _ := json.Marshal(engine.UpRequest{
+	dc := client.NewDaemonClient(*apiFlag, nil)
+	nm, err := dc.Up(context.Background(), client.UpOptions{
 		ServerURL:        *serverURL,
 		AuthKey:          *authKey,
 		Hostname:         *hostname,
@@ -113,27 +110,18 @@ func runUp(apiBase string, args []string) {
 		ExitNode:         *exitNode,
 		CanRelay:         *canRelay,
 	})
-	resp, err := http.Post(strings.TrimRight(*apiFlag, "/")+"/local/v1/up", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
-		fatalf("cannot reach acktierd LocalAPI (%s): %v", *apiFlag, err)
+		fatalf("%v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		fatalf("acktier up failed: %s", strings.TrimSpace(string(raw)))
-	}
-	var nm types.NetMap
-	_ = json.NewDecoder(resp.Body).Decode(&nm)
 	fmt.Printf("AckTier is UP!\n  Node Name : %s\n  IPv4      : %s\n  IPv6      : %s\n  Peers     : %d\n",
 		nm.Self.Name, nm.Self.IPv4, nm.Self.IPv6, len(nm.Peers))
 }
 
 func runDown(apiBase string) {
-	resp, err := http.Post(apiBase+"/local/v1/down", "application/json", strings.NewReader("{}"))
-	if err != nil {
-		fatalf("cannot reach acktierd: %v", err)
+	dc := client.NewDaemonClient(apiBase, nil)
+	if err := dc.Down(context.Background()); err != nil {
+		fatalf("%v", err)
 	}
-	defer resp.Body.Close()
 	fmt.Println("AckTier network disconnected.")
 }
 
@@ -143,15 +131,10 @@ func runStatus(apiBase string, args []string) {
 	asJSON := fs.Bool("json", false, "Output raw JSON")
 	_ = fs.Parse(args)
 
-	resp, err := http.Get(strings.TrimRight(*apiFlag, "/") + "/local/v1/status")
+	dc := client.NewDaemonClient(*apiFlag, nil)
+	st, err := dc.Status(context.Background())
 	if err != nil {
-		fatalf("cannot reach acktierd (%s): %v", *apiFlag, err)
-	}
-	defer resp.Body.Close()
-
-	var st engine.StatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
-		fatalf("decode status: %v", err)
+		fatalf("%v", err)
 	}
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -198,15 +181,10 @@ func runMesh(apiBase string, args []string) {
 	asJSON := fs.Bool("json", false, "Output raw JSON")
 	_ = fs.Parse(args)
 
-	resp, err := http.Get(strings.TrimRight(*apiFlag, "/") + "/local/v1/mesh")
+	dc := client.NewDaemonClient(*apiFlag, nil)
+	rep, err := dc.Mesh(context.Background())
 	if err != nil {
-		fatalf("cannot reach acktierd (%s): %v", *apiFlag, err)
-	}
-	defer resp.Body.Close()
-
-	var rep engine.MeshStatusReport
-	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
-		fatalf("decode mesh report: %v", err)
+		fatalf("%v", err)
 	}
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -236,15 +214,10 @@ func runNetCheck(apiBase string, args []string) {
 	asJSON := fs.Bool("json", false, "Output raw JSON")
 	_ = fs.Parse(args)
 
-	resp, err := http.Get(strings.TrimRight(*apiFlag, "/") + "/local/v1/netcheck")
+	dc := client.NewDaemonClient(*apiFlag, nil)
+	rep, err := dc.NetCheck(context.Background())
 	if err != nil {
-		fatalf("cannot reach acktierd (%s): %v", *apiFlag, err)
-	}
-	defer resp.Body.Close()
-
-	var rep engine.NetCheckReport
-	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
-		fatalf("decode netcheck: %v", err)
+		fatalf("%v", err)
 	}
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -279,21 +252,13 @@ func runPing(apiBase string, args []string) {
 		fatalf("usage: acktier ping <peer-name-or-ip>")
 	}
 	target := fs.Arg(0)
+	dc := client.NewDaemonClient(*apiFlag, nil)
 
 	for i := 0; i < *count; i++ {
-		raw, _ := json.Marshal(map[string]any{"target": target, "timeoutMs": 3000})
-		resp, err := http.Post(strings.TrimRight(*apiFlag, "/")+"/local/v1/ping", "application/json", bytes.NewReader(raw))
+		res, err := dc.Ping(context.Background(), target, 3*time.Second)
 		if err != nil {
-			fatalf("cannot reach acktierd: %v", err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			msg, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			fmt.Printf("ping %s: timeout/error (%s)\n", target, strings.TrimSpace(string(msg)))
+			fmt.Printf("ping %s: %v\n", target, err)
 		} else {
-			var res engine.PingResult
-			_ = json.NewDecoder(resp.Body).Decode(&res)
-			_ = resp.Body.Close()
 			fmt.Printf("pong from %s (%s) via %s [%s] time=%.2f ms\n",
 				res.TargetName, res.TargetIP, res.Via, res.Endpoint, res.RTTMillis)
 		}
@@ -301,6 +266,29 @@ func runPing(apiBase string, args []string) {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
+}
+
+func runDNS(apiBase string, args []string) {
+	if len(args) == 0 {
+		fatalf("usage: acktier dns <hostname>")
+	}
+	dc := client.NewDaemonClient(apiBase, nil)
+	res, err := dc.LookupDNS(context.Background(), args[0])
+	if err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Printf("FQDN : %s\nIPv4 : %s\nIPv6 : %s\n", res.FQDN, res.IPv4, res.IPv6)
+}
+
+func runExitNode(apiBase string, args []string) {
+	if len(args) == 0 {
+		fatalf("usage: acktier exit-node <peer-name-or-none>")
+	}
+	dc := client.NewDaemonClient(apiBase, nil)
+	if err := dc.SetExitNode(context.Background(), args[0]); err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Printf("Active Exit Node updated to: %s\n", args[0])
 }
 
 func runAdminKey(args []string) {
@@ -314,64 +302,16 @@ func runAdminKey(args []string) {
 	label := fs.String("label", "cli-key", "Key label")
 	_ = fs.Parse(args[1:])
 
-	raw, _ := json.Marshal(map[string]any{
-		"label":    *label,
-		"reusable": *reusable,
+	ac := client.NewAdminClient(*serverURL, *token, nil)
+	pak, err := ac.CreatePreAuthKey(context.Background(), client.CreateKeyOptions{
+		Label:    *label,
+		Reusable: *reusable,
 	})
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(*serverURL, "/")+"/api/v1/admin/keys", bytes.NewReader(raw))
 	if err != nil {
-		fatalf("build request: %v", err)
+		fatalf("%v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+*token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fatalf("admin request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		b, _ := io.ReadAll(resp.Body)
-		fatalf("failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
-	}
-	var pak types.PreAuthKey
-	_ = json.NewDecoder(resp.Body).Decode(&pak)
 	fmt.Printf("Created PreAuthKey:\n  ID       : %s\n  Key      : %s\n  Reusable : %v\n  Expires  : %s\n",
 		pak.ID, pak.Key, pak.Reusable, pak.ExpiresAt.Format(time.RFC3339))
-}
-
-func runDNS(apiBase string, args []string) {
-	if len(args) == 0 {
-		fatalf("usage: acktier dns <hostname>")
-	}
-	resp, err := http.Get(apiBase + "/local/v1/dns?name=" + args[0])
-	if err != nil {
-		fatalf("cannot reach acktierd: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		fatalf("MagicDNS lookup failed: %s", strings.TrimSpace(string(b)))
-	}
-	var out map[string]string
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	fmt.Printf("FQDN : %s\nIPv4 : %s\nIPv6 : %s\n", out["fqdn"], out["ipv4"], out["ipv6"])
-}
-
-func runExitNode(apiBase string, args []string) {
-	if len(args) == 0 {
-		fatalf("usage: acktier exit-node <peer-name-or-none>")
-	}
-	raw, _ := json.Marshal(map[string]string{"exitNode": args[0]})
-	resp, err := http.Post(apiBase+"/local/v1/exit-node", "application/json", bytes.NewReader(raw))
-	if err != nil {
-		fatalf("cannot reach acktierd: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		fatalf("set exit-node failed: %s", strings.TrimSpace(string(b)))
-	}
-	fmt.Printf("Active Exit Node updated to: %s\n", args[0])
 }
 
 func runAdminRoute(args []string) {
@@ -397,19 +337,9 @@ func runAdminRoute(args []string) {
 			pfxs = append(pfxs, pfx)
 		}
 	}
-	raw, _ := json.Marshal(map[string]any{"routes": pfxs})
-	url := fmt.Sprintf("%s/api/v1/admin/nodes/%d/routes/approve", strings.TrimRight(*serverURL, "/"), *nodeID)
-	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+*token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		fatalf("route approve failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	ac := client.NewAdminClient(*serverURL, *token, nil)
+	if _, err := ac.ApproveRoutes(context.Background(), types.NodeID(*nodeID), pfxs); err != nil {
+		fatalf("%v", err)
 	}
 	fmt.Printf("Approved routes %v on node #%d.\n", pfxs, *nodeID)
 }
@@ -427,17 +357,13 @@ func runAdminACL(args []string) {
 	if err != nil {
 		fatalf("read policy file: %v", err)
 	}
-	req, _ := http.NewRequest(http.MethodPut, strings.TrimRight(*serverURL, "/")+"/api/v1/admin/acl", bytes.NewReader(raw))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+*token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fatalf("request failed: %v", err)
+	var pol types.ACLPolicy
+	if err := json.Unmarshal(raw, &pol); err != nil {
+		fatalf("parse policy json: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		fatalf("acl set failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	ac := client.NewAdminClient(*serverURL, *token, nil)
+	if _, err := ac.SetACL(context.Background(), pol); err != nil {
+		fatalf("%v", err)
 	}
 	fmt.Println("Zero-Trust ACL Policy applied and pushed to all connected nodes!")
 }
