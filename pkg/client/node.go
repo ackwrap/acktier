@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/acktier/acktier/internal/daemon/engine"
 	"github.com/acktier/acktier/internal/daemon/localapi"
@@ -74,9 +75,13 @@ type NodeConfig struct {
 	QUICListenAddr string
 	WSSListenAddr  string
 
-	EnableUPnP         bool
-	EnableLANDiscovery bool
-	DisableUDP         bool
+	EnableUPnP          bool
+	EnableLANDiscovery  bool
+	EnableNetMonitor    bool
+	DisableUDP          bool
+	BlackholeProbeAfter time.Duration
+	BlackholeTimeout    time.Duration
+	NetMonitorInterval  time.Duration
 
 	// Optional custom dialers/transports for custom host environments or sandboxed testing.
 	CustomUDPConn  net.PacketConn
@@ -98,6 +103,7 @@ func DefaultNodeConfig(statePath string) NodeConfig {
 		WSSListenAddr:      "0.0.0.0:0",
 		EnableUPnP:         true,
 		EnableLANDiscovery: true,
+		EnableNetMonitor:   true,
 	}
 }
 
@@ -160,9 +166,13 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		RelayDial:          cfg.RelayDial,
 		GatewayTCPDial:     cfg.GatewayTCPDial,
 		GatewayUDPDial:     cfg.GatewayUDPDial,
-		DisableUDP:         cfg.DisableUDP,
-		EnableLANDiscovery: cfg.EnableLANDiscovery,
-		EnablePortMap:      cfg.EnableUPnP,
+		DisableUDP:          cfg.DisableUDP,
+		EnableLANDiscovery:  cfg.EnableLANDiscovery,
+		EnablePortMap:       cfg.EnableUPnP,
+		EnableNetMonitor:    cfg.EnableNetMonitor,
+		BlackholeProbeAfter: cfg.BlackholeProbeAfter,
+		BlackholeTimeout:    cfg.BlackholeTimeout,
+		NetMonitorInterval:  cfg.NetMonitorInterval,
 	})
 	if err != nil {
 		_ = tunDev.Close()
@@ -267,6 +277,12 @@ func (n *Node) SetExitNode(peer string) error {
 	}
 	n.emit(EventExitChanged)
 	return nil
+}
+
+// NotifyNetworkChange immediately triggers STUN refresh, control heartbeat, and peer roaming probes
+// (ideal when mobile/desktop OS hooks detect Wi-Fi / cellular handoff).
+func (n *Node) NotifyNetworkChange() {
+	n.eng.NotifyNetworkChange()
 }
 
 // LocalAPIHandler returns an http.Handler exposing the standard `/local/v1/*` IPC endpoints.

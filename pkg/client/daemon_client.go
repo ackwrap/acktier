@@ -109,6 +109,10 @@ func (c *DaemonClient) SetExitNode(ctx context.Context, peer string) error {
 	return c.doJSON(ctx, http.MethodPost, "/local/v1/exit-node", map[string]string{"exitNode": peer}, nil)
 }
 
+func (c *DaemonClient) NotifyNetworkChange(ctx context.Context) error {
+	return c.doJSON(ctx, http.MethodPost, "/local/v1/network-change", map[string]any{}, nil)
+}
+
 func (c *DaemonClient) doJSON(ctx context.Context, method, path string, reqBody any, respOut any) error {
 	var bodyReader io.Reader
 	if reqBody != nil {

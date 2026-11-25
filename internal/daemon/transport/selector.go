@@ -2,26 +2,37 @@ package transport
 
 import (
 	"math"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/acktier/acktier/pkg/types"
 )
 
-const PathActiveTTL = 45 * time.Second
+const (
+	PathActiveTTL            = 45 * time.Second
+	DefaultFastProbeAfter    = 2500 * time.Millisecond
+	DefaultBlackholeTimeout  = 4500 * time.Millisecond
+	fastProbeMinInterval     = 700 * time.Millisecond
+)
 
-// PathMetrics tracks live latency and reachability for a single (Peer, Endpoint) tuple.
+// PathMetrics tracks live latency, active-tx blackhole state, and reachability for a single (Peer, Endpoint) tuple.
 type PathMetrics struct {
 	Endpoint          types.Endpoint
 	SmoothedRTTMicros int64
 	LastRx            time.Time
 	LastProbeTx       time.Time
+	UnansweredTxSince time.Time // Non-zero when packets were sent since LastRx with zero inbound response
 	RxPackets         uint64
 }
 
-// Score computes a composite path cost in milliseconds (lower is better).
-func (pm *PathMetrics) Score(now time.Time) (float64, bool) {
+// Score computes a composite path cost in milliseconds (lower is better), marking paths dead
+// either when idle > PathActiveTTL OR when active outbound traffic goes unanswered >= blackholeTimeout!
+func (pm *PathMetrics) Score(now time.Time, blackholeTimeout time.Duration) (float64, bool) {
 	if pm.LastRx.IsZero() || now.Sub(pm.LastRx) > PathActiveTTL {
+		return math.MaxFloat64, false
+	}
+	if blackholeTimeout > 0 && !pm.UnansweredTxSince.IsZero() && now.Sub(pm.UnansweredTxSince) >= blackholeTimeout {
 		return math.MaxFloat64, false
 	}
 	rttMs := float64(pm.SmoothedRTTMicros) / 1000.0
@@ -47,17 +58,72 @@ func (pm *PathMetrics) Score(now time.Time) (float64, bool) {
 
 // Selector maintains multi-protocol candidate endpoints per peer and dynamically chooses the lowest-cost active path.
 type Selector struct {
-	mu    sync.RWMutex
-	peers map[types.PublicKey]map[types.Endpoint]*PathMetrics
+	mu               sync.RWMutex
+	peers            map[types.PublicKey]map[types.Endpoint]*PathMetrics
+	fastProbeAfter   time.Duration
+	blackholeTimeout time.Duration
 }
 
 func NewSelector() *Selector {
 	return &Selector{
-		peers: make(map[types.PublicKey]map[types.Endpoint]*PathMetrics),
+		peers:            make(map[types.PublicKey]map[types.Endpoint]*PathMetrics),
+		fastProbeAfter:   DefaultFastProbeAfter,
+		blackholeTimeout: DefaultBlackholeTimeout,
 	}
 }
 
-// SetCandidates merges control-plane or LAN-discovered candidate endpoints for a peer.
+// SetBlackholeThresholds customizes the active-tx fast-probe trigger and silent blackhole failover timeout.
+func (s *Selector) SetBlackholeThresholds(fastProbeAfter, blackholeTimeout time.Duration) {
+	s.mu.Lock()
+	if fastProbeAfter > 0 {
+		s.fastProbeAfter = fastProbeAfter
+	}
+	if blackholeTimeout > 0 {
+		s.blackholeTimeout = blackholeTimeout
+	}
+	s.mu.Unlock()
+}
+
+// SyncCandidates updates a peer's candidate list from an authoritative NetMap or CallMeMaybe announcement,
+// immediately evicting stale endpoints whose host IP the peer no longer owns (instant Wi-Fi -> 5G roaming!),
+// while preserving dynamically punched ports on IPs the peer still advertises.
+func (s *Selector) SyncCandidates(peer types.PublicKey, authoritative []types.Endpoint) {
+	activeHosts := make(map[string]bool, len(authoritative))
+	for _, ep := range authoritative {
+		if h, _, err := net.SplitHostPort(ep.Addr); err == nil && h != "" {
+			activeHosts[h] = true
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.peers[peer]
+	if m == nil {
+		m = make(map[types.Endpoint]*PathMetrics)
+		s.peers[peer] = m
+	}
+
+	if len(activeHosts) > 0 {
+		for ep := range m {
+			if h, _, err := net.SplitHostPort(ep.Addr); err == nil && !activeHosts[h] {
+				delete(m, ep)
+			}
+		}
+	}
+
+	for _, ep := range authoritative {
+		if ep.Addr == "" || ep.Proto == "" {
+			continue
+		}
+		if existing, ok := m[ep]; !ok {
+			m[ep] = &PathMetrics{Endpoint: ep}
+		} else {
+			existing.Endpoint.IsLAN = ep.IsLAN
+		}
+	}
+}
+
+// SetCandidates merges additional (e.g. LAN-discovered) candidate endpoints without evicting existing ones.
 func (s *Selector) SetCandidates(peer types.PublicKey, endpoints []types.Endpoint) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -78,11 +144,40 @@ func (s *Selector) SetCandidates(peer types.PublicKey, endpoints []types.Endpoin
 	}
 }
 
-// RecordRx marks an endpoint as verified-alive upon receiving an authenticated packet.
+// RecordTx records an outbound data transmission on ep and returns shouldFastProbe=true when
+// continuous outbound traffic has gone unanswered for >= fastProbeAfter (soliciting an immediate Pong!).
+func (s *Selector) RecordTx(peer types.PublicKey, ep types.Endpoint) (shouldFastProbe bool) {
+	if ep.Addr == "" || ep.Proto == "" {
+		return false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.peers[peer]
+	if m == nil {
+		return false
+	}
+	pm := m[ep]
+	if pm == nil {
+		return false
+	}
+	if pm.UnansweredTxSince.IsZero() {
+		pm.UnansweredTxSince = now
+		return false
+	}
+	if now.Sub(pm.UnansweredTxSince) >= s.fastProbeAfter && now.Sub(pm.LastProbeTx) >= fastProbeMinInterval {
+		pm.LastProbeTx = now
+		return true
+	}
+	return false
+}
+
+// RecordRx marks an endpoint as verified-alive upon receiving an authenticated packet and clears blackhole timers.
 func (s *Selector) RecordRx(peer types.PublicKey, ep types.Endpoint, rttSample time.Duration) {
 	if ep.Addr == "" || ep.Proto == "" {
 		return
 	}
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.peers[peer]
@@ -95,7 +190,8 @@ func (s *Selector) RecordRx(peer types.PublicKey, ep types.Endpoint, rttSample t
 		pm = &PathMetrics{Endpoint: ep}
 		m[ep] = pm
 	}
-	pm.LastRx = time.Now()
+	pm.LastRx = now
+	pm.UnansweredTxSince = time.Time{}
 	pm.RxPackets++
 	if rttSample > 0 {
 		sampleUs := rttSample.Microseconds()
@@ -110,7 +206,22 @@ func (s *Selector) RecordRx(peer types.PublicKey, ep types.Endpoint, rttSample t
 	}
 }
 
-// BestEndpoint returns the lowest-score verified direct endpoint for peer, if any is currently alive.
+// OnLocalNetworkChange accelerates path re-verification when the local host switches Wi-Fi / hotspot interfaces.
+func (s *Selector) OnLocalNetworkChange() {
+	now := time.Now()
+	s.mu.Lock()
+	for _, m := range s.peers {
+		for _, pm := range m {
+			if !pm.LastRx.IsZero() && pm.UnansweredTxSince.IsZero() {
+				// Start unanswered timer at fastProbe threshold so next tx immediately verifies path!
+				pm.UnansweredTxSince = now.Add(-s.fastProbeAfter)
+			}
+		}
+	}
+	s.mu.Unlock()
+}
+
+// BestEndpoint returns the lowest-score verified direct endpoint for peer, if any is currently alive and non-blackholed.
 func (s *Selector) BestEndpoint(peer types.PublicKey) (types.Endpoint, float64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -122,7 +233,7 @@ func (s *Selector) BestEndpoint(peer types.PublicKey) (types.Endpoint, float64, 
 	bestScore := math.MaxFloat64
 	var bestPM *PathMetrics
 	for _, pm := range m {
-		score, alive := pm.Score(now)
+		score, alive := pm.Score(now, s.blackholeTimeout)
 		if alive && score < bestScore {
 			bestScore = score
 			bestPM = pm

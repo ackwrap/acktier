@@ -70,6 +70,16 @@ func (d *Detector) SetSTUNServers(primary, alt string) {
 	d.mu.Unlock()
 }
 
+// ResetObservations clears cached WAN observations when the host switches network interfaces (e.g. Wi-Fi -> Hotspot).
+func (d *Detector) ResetObservations() {
+	d.mu.Lock()
+	d.observedPrimary = ""
+	d.observedAlt = ""
+	d.kind = KindUnknown
+	d.portStep = 0
+	d.mu.Unlock()
+}
+
 // RecordObservation updates NAT classification when a STUN Pong arrives from fromSTUNAddr.
 func (d *Detector) RecordObservation(fromSTUNAddr, observedAddr string, rtt time.Duration, localIPs []netip.Addr) {
 	if observedAddr == "" {

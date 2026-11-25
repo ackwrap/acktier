@@ -27,6 +27,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /local/v1/netcheck", s.handleNetCheck)
 	mux.HandleFunc("GET /local/v1/dns", s.handleDNSLookup)
 	mux.HandleFunc("POST /local/v1/exit-node", s.handleSetExitNode)
+	mux.HandleFunc("POST /local/v1/network-change", s.handleNetworkChange)
 	mux.HandleFunc("POST /local/v1/up", s.handleUp)
 	mux.HandleFunc("POST /local/v1/down", s.handleDown)
 	mux.HandleFunc("POST /local/v1/ping", s.handlePing)
@@ -68,6 +69,11 @@ func (s *Server) handleSetExitNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"exitNode": req.ExitNode})
+}
+
+func (s *Server) handleNetworkChange(w http.ResponseWriter, r *http.Request) {
+	s.eng.NotifyNetworkChange()
+	writeJSON(w, http.StatusOK, map[string]bool{"roamingTriggered": true})
 }
 
 func (s *Server) handleNetCheck(w http.ResponseWriter, r *http.Request) {

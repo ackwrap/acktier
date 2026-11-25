@@ -50,19 +50,26 @@ type Options struct {
 	RelayDial          DialFunc                // Optional stream dialer for Relay Plane
 	GatewayTCPDial     netstack.DialStreamFunc // Optional outbound TCP dialer for Subnet Router / Exit Node
 	GatewayUDPDial     netstack.DialPacketFunc // Optional outbound UDP dialer for Subnet Router / Exit Node
-	DisableUDP         bool                    // Force disable direct UDP (testing / strict firewall simulation)
-	EnableLANDiscovery bool           // Broadcast/listen for L2 LAN peer discovery beacons
-	EnablePortMap      bool           // Attempt UPnP IGD / NAT-PMP automatic router port mapping
+	DisableUDP          bool                    // Force disable direct UDP (testing / strict firewall simulation)
+	EnableLANDiscovery  bool                    // Broadcast/listen for L2 LAN peer discovery beacons
+	EnablePortMap       bool                    // Attempt UPnP IGD / NAT-PMP automatic router port mapping
+	EnableNetMonitor    bool                    // Watch host NIC/IP changes for instant roaming notification
+	BlackholeProbeAfter time.Duration           // Active-tx unanswered duration before fast probe (default 2.5s)
+	BlackholeTimeout    time.Duration           // Active-tx unanswered duration before declaring direct path dead (default 4.5s)
+	NetMonitorInterval  time.Duration           // Interface change poll interval (default 1.5s)
 }
 
+const centerRelayPenaltyMs = 6.0
+
 type peerRuntime struct {
-	mu            sync.RWMutex
-	meta          types.PeerNode
-	lastHandshake time.Time
-	lastPunch     time.Time
-	lastRTTMicros int64
-	rxBytes       atomic.Uint64
-	txBytes       atomic.Uint64
+	mu                   sync.RWMutex
+	meta                 types.PeerNode
+	lastHandshake        time.Time
+	lastPunch            time.Time
+	lastRTTMicros        int64
+	lastCenterRelayRTTUs int64
+	rxBytes              atomic.Uint64
+	txBytes              atomic.Uint64
 }
 
 // PeerStatus summarizes live connectivity and traffic telemetry for CLI / GUI display.
@@ -97,6 +104,7 @@ type StatusResponse struct {
 	ExitNode           string                          `json:"exitNode,omitempty"`
 	CanRelay           bool                            `json:"canRelay"`
 	RelayConnected     bool                            `json:"relayConnected"`
+	CenterRelayRTTMs   float64                         `json:"centerRelayRttMs,omitempty"`
 	PeerRelayedFrames  uint64                          `json:"peerRelayedFrames"`
 	PeerRelayedBytes   uint64                          `json:"peerRelayedBytes"`
 	GatewayProxiedPkts uint64                          `json:"gatewayProxiedPkts"`
@@ -130,11 +138,12 @@ type MeshStatusReport struct {
 
 // NetCheckReport returns comprehensive NAT, STUN, UPnP/NAT-PMP, Relay, and Multi-Transport diagnostics.
 type NetCheckReport struct {
-	NAT             nat.Summary                     `json:"nat"`
-	RelayConnected  bool                            `json:"relayConnected"`
-	LocalTransports map[types.TransportProto]string `json:"localTransports"`
-	CandidateCount  int                             `json:"candidateCount"`
-	Candidates      []types.Endpoint                `json:"candidates"`
+	NAT              nat.Summary                     `json:"nat"`
+	RelayConnected   bool                            `json:"relayConnected"`
+	CenterRelayRTTMs float64                         `json:"centerRelayRttMs,omitempty"`
+	LocalTransports  map[types.TransportProto]string `json:"localTransports"`
+	CandidateCount   int                             `json:"candidateCount"`
+	Candidates       []types.Endpoint                `json:"candidates"`
 }
 
 // UpRequest parameters for bringing up the AckTier overlay network.
@@ -179,6 +188,8 @@ type Engine struct {
 	disableUDP         bool
 	enableLANDiscovery bool
 	enablePortMap      bool
+	enableNetMonitor   bool
+	netMonInterval     time.Duration
 
 	mu                 sync.RWMutex
 	running            bool
@@ -232,6 +243,8 @@ func New(opts Options) (*Engine, error) {
 		disableUDP:         opts.DisableUDP,
 		enableLANDiscovery: opts.EnableLANDiscovery,
 		enablePortMap:      opts.EnablePortMap,
+		enableNetMonitor:   opts.EnableNetMonitor,
+		netMonInterval:     opts.NetMonitorInterval,
 		peersByKey:         make(map[types.PublicKey]*peerRuntime),
 		peersByIP:          make(map[netip.Addr]*peerRuntime),
 		hbTriggerCh:        make(chan struct{}, 1),
@@ -239,6 +252,9 @@ func New(opts Options) (*Engine, error) {
 		closedCh:           make(chan struct{}),
 	}
 
+	if opts.BlackholeProbeAfter > 0 || opts.BlackholeTimeout > 0 {
+		e.selector.SetBlackholeThresholds(opts.BlackholeProbeAfter, opts.BlackholeTimeout)
+	}
 	if e.hub == nil {
 		e.hub = transport.NewHub()
 	}
@@ -364,6 +380,13 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 		})
 		go ld.Run(runCtx)
 	}
+	if e.enableNetMonitor {
+		nmMon := nat.NewNetMonitor(e.tunDev.Name(), e.netMonInterval, func(prev, curr string) {
+			log.Printf("[engine] host network change detected (%s -> %s); roaming endpoints...", prev, curr)
+			e.NotifyNetworkChange()
+		})
+		go nmMon.Run(runCtx)
+	}
 	go e.mapStreamLoop(runCtx, serverURL, regResp.NodeToken)
 	go e.maintenanceLoop(runCtx, serverURL, regResp.NodeToken)
 
@@ -440,6 +463,45 @@ func (e *Engine) LookupDNS(name string) (ipv4, ipv6 string, fqdn string, ok bool
 	return ipv4, ipv6, full, true
 }
 
+// NotifyNetworkChange immediately refreshes STUN/port-mappings, pushes a new Heartbeat to Control,
+// and actively sends roaming probes to all online peers when the host switches Wi-Fi / cellular networks.
+func (e *Engine) NotifyNetworkChange() {
+	e.mu.RLock()
+	running := e.running
+	peers := make([]*peerRuntime, 0, len(e.peersByKey))
+	for _, pr := range e.peersByKey {
+		peers = append(peers, pr)
+	}
+	e.mu.RUnlock()
+	if !running {
+		return
+	}
+
+	e.natDetector.ResetObservations()
+	e.selector.OnLocalNetworkChange()
+	e.sendSTUNProbes()
+	e.relayCli.SendServerPing()
+
+	go func() {
+		// Allow brief window for STUN Pong to record new WAN IP:Port before advertising
+		time.Sleep(50 * time.Millisecond)
+		e.requestImmediateHeartbeat()
+
+		for _, pr := range peers {
+			pr.mu.Lock()
+			online := pr.meta.Online
+			peerKey := pr.meta.NodeKey
+			pr.lastPunch = time.Time{} // bypass 2s punch cooldown on network switch!
+			pr.mu.Unlock()
+			if !online {
+				continue
+			}
+			e.triggerCoordinatedHolePunch(pr)
+			e.probePeerCandidates(peerKey, e.selector.AllCandidates(peerKey))
+		}
+	}()
+}
+
 func (e *Engine) Status() StatusResponse {
 	st := e.stateMgr.Get()
 	natKind, _, _, _ := e.natDetector.Snapshot()
@@ -469,22 +531,21 @@ func (e *Engine) Status() StatusResponse {
 			ps.IPv6 = p.IPv6.String()
 		}
 		if pr != nil {
-			meshRt, hasMesh := e.meshRouter.Lookup(p.NodeKey)
-			bestEp, bestRTT, hasDirect := e.selector.BestEndpoint(p.NodeKey)
-			useMeshRelay := hasMesh && meshRt.IsPeerRelayed && (!hasDirect || (bestRTT > 0 && meshRt.TotalCostMs+10.0 < bestRTT))
-
-			if useMeshRelay {
+			mode, bestEp, meshRt, effRTT := e.selectPathDecision(pr, p.NodeKey)
+			switch mode {
+			case pathDecisionPeerMesh:
 				ps.ActivePath = "peer-relay"
 				ps.MeshHops = formatHopNames(meshRt.Hops, namesMap)
-				ps.RTTMillis = meshRt.TotalCostMs
-			} else if hasDirect {
+				ps.RTTMillis = effRTT
+			case pathDecisionDirect:
 				ps.ActivePath = "direct-" + string(bestEp.Proto)
 				ps.DirectAddr = bestEp.Addr
-				if bestRTT > 0 {
-					ps.RTTMillis = bestRTT
+				ps.RTTMillis = effRTT
+			case pathDecisionCenterRelay:
+				if e.cryptoMgr.HasActiveSession(p.NodeKey) {
+					ps.ActivePath = "relay"
+					ps.RTTMillis = effRTT
 				}
-			} else if e.cryptoMgr.HasActiveSession(p.NodeKey) && e.relayCli.Connected() {
-				ps.ActivePath = "relay"
 			}
 			pr.mu.RLock()
 			if ps.RTTMillis == 0 && pr.lastRTTMicros > 0 {
@@ -513,6 +574,7 @@ func (e *Engine) Status() StatusResponse {
 		ExitNode:           st.ExitNode,
 		CanRelay:           st.CanRelay,
 		RelayConnected:     e.relayCli.Connected(),
+		CenterRelayRTTMs:   e.relayCli.RTTMillis(),
 		PeerRelayedFrames:  e.peerRelayedFrames.Load(),
 		PeerRelayedBytes:   e.peerRelayedBytes.Load(),
 		GatewayProxiedPkts: gwPkts,
@@ -590,6 +652,7 @@ func (e *Engine) MeshStatus() MeshStatusReport {
 // NetCheck executes active STUN probes and compiles a local network & NAT diagnostic report.
 func (e *Engine) NetCheck(ctx context.Context) NetCheckReport {
 	e.sendSTUNProbes()
+	e.relayCli.SendServerPing()
 	select {
 	case <-ctx.Done():
 	case <-time.After(250 * time.Millisecond):
@@ -608,11 +671,12 @@ func (e *Engine) NetCheck(ctx context.Context) NetCheckReport {
 	uUDP, uTCP := e.portMapper.MappedAddrs()
 	cands := e.collectLocalEndpoints()
 	return NetCheckReport{
-		NAT:             e.natDetector.FullSummary(uUDP, uTCP),
-		RelayConnected:  e.relayCli.Connected(),
-		LocalTransports: e.hub.LocalPorts(),
-		CandidateCount:  len(cands),
-		Candidates:      cands,
+		NAT:              e.natDetector.FullSummary(uUDP, uTCP),
+		RelayConnected:   e.relayCli.Connected(),
+		CenterRelayRTTMs: e.relayCli.RTTMillis(),
+		LocalTransports:  e.hub.LocalPorts(),
+		CandidateCount:   len(cands),
+		Candidates:       cands,
 	}
 }
 
@@ -750,7 +814,7 @@ func (e *Engine) applyNetMap(nm types.NetMap) {
 		pr.meta = p
 		pr.mu.Unlock()
 
-		e.selector.SetCandidates(p.NodeKey, p.Endpoints)
+		e.selector.SyncCandidates(p.NodeKey, p.Endpoints)
 
 		newByKey[p.NodeKey] = pr
 		if p.IPv4.IsValid() {
@@ -1121,7 +1185,7 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 		if e.getPeerRuntime(sender) == nil {
 			return
 		}
-		e.selector.SetCandidates(sender, peerEps)
+		e.selector.SyncCandidates(sender, peerEps)
 		if !isReply {
 			kind, step, _, _ := e.natDetector.Snapshot()
 			myEps := e.collectLocalEndpoints()
@@ -1165,6 +1229,17 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 		if pr != nil {
 			pr.mu.Lock()
 			pr.lastRTTMicros = rtt.Microseconds()
+			if srcMode == sourceCenterRelay {
+				sampleUs := rtt.Microseconds()
+				if sampleUs < 50 {
+					sampleUs = 50
+				}
+				if pr.lastCenterRelayRTTUs <= 0 {
+					pr.lastCenterRelayRTTUs = sampleUs
+				} else {
+					pr.lastCenterRelayRTTUs = (pr.lastCenterRelayRTTUs*3 + sampleUs) / 4
+				}
+			}
 			pr.mu.Unlock()
 			if srcMode == sourceDirect && srcEp.Addr != "" {
 				e.recordDirectLinkRx(sender, srcEp, rtt)
@@ -1262,40 +1337,123 @@ func (e *Engine) getPeerRuntime(key types.PublicKey) *peerRuntime {
 	return pr
 }
 
-// sendWireToPeer dispatches encrypted data over the lowest-latency path:
-// 1. Peer Multi-Hop Mesh if Direct is unavailable OR severely degraded compared to Multi-Hop!
-// 2. Verified Direct Transport (UDP / QUIC / TCP / WSS)
-// 3. Center Relay fallback + background coordinated hole punching
+type pathDecisionKind uint8
+
+const (
+	pathDecisionNone pathDecisionKind = iota
+	pathDecisionDirect
+	pathDecisionPeerMesh
+	pathDecisionCenterRelay
+)
+
+// estimateCenterRelayCostMs returns the estimated E2E RTT + penalty via Center Relay, if connected.
+func (e *Engine) estimateCenterRelayCostMs(pr *peerRuntime) (rttMs float64, costMs float64, ok bool) {
+	if !e.relayCli.Connected() {
+		return 0, 0, false
+	}
+	if pr != nil {
+		pr.mu.RLock()
+		peerRelayUs := pr.lastCenterRelayRTTUs
+		pr.mu.RUnlock()
+		if peerRelayUs > 0 {
+			rttMs = float64(peerRelayUs) / 1000.0
+			return rttMs, rttMs + centerRelayPenaltyMs, true
+		}
+	}
+	srvRTT := e.relayCli.RTTMillis()
+	if srvRTT > 0 {
+		rttMs = srvRTT * 2.0 // Self->Server + Server->Peer symmetric estimate
+	} else {
+		rttMs = 15.0
+	}
+	return rttMs, rttMs + centerRelayPenaltyMs, true
+}
+
+// selectPathDecision runs unified cost comparison across Verified Direct, Multi-Hop Peer Relay, and Center Relay.
+func (e *Engine) selectPathDecision(pr *peerRuntime, peerKey types.PublicKey) (pathDecisionKind, types.Endpoint, mesh.Route, float64) {
+	bestEp, directRTT, hasDirect := e.selector.BestEndpoint(peerKey)
+	if hasDirect && e.disableUDP && bestEp.Proto == types.ProtoUDP {
+		hasDirect = false
+	}
+
+	meshRt, hasMesh := e.meshRouter.Lookup(peerKey)
+	hasPeerRelay := hasMesh && meshRt.IsPeerRelayed
+	centerRTT, centerCost, hasCenter := e.estimateCenterRelayCostMs(pr)
+
+	// Pick the better Relay between Peer Multi-Hop Mesh and Center Relay based on measured latency!
+	bestRelayKind := pathDecisionNone
+	bestRelayCost := 0.0
+	bestRelayRTT := 0.0
+	if hasPeerRelay && hasCenter {
+		if centerCost < meshRt.TotalCostMs {
+			bestRelayKind = pathDecisionCenterRelay
+			bestRelayCost = centerCost
+			bestRelayRTT = centerRTT
+		} else {
+			bestRelayKind = pathDecisionPeerMesh
+			bestRelayCost = meshRt.TotalCostMs
+			bestRelayRTT = meshRt.TotalCostMs
+		}
+	} else if hasPeerRelay {
+		bestRelayKind = pathDecisionPeerMesh
+		bestRelayCost = meshRt.TotalCostMs
+		bestRelayRTT = meshRt.TotalCostMs
+	} else if hasCenter {
+		bestRelayKind = pathDecisionCenterRelay
+		bestRelayCost = centerCost
+		bestRelayRTT = centerRTT
+	}
+
+	if hasDirect {
+		// Bypass degraded Direct path if either Peer Mesh OR Center Relay beats Direct by > 10ms!
+		if bestRelayKind != pathDecisionNone && directRTT > 0 && bestRelayCost+10.0 < directRTT {
+			return bestRelayKind, types.Endpoint{}, meshRt, bestRelayRTT
+		}
+		return pathDecisionDirect, bestEp, mesh.Route{}, directRTT
+	}
+
+	if bestRelayKind != pathDecisionNone {
+		return bestRelayKind, types.Endpoint{}, meshRt, bestRelayRTT
+	}
+	return pathDecisionNone, types.Endpoint{}, mesh.Route{}, 0
+}
+
+// sendWireToPeer dispatches encrypted data using unified 3-tier cost selection + active-tx fast blackhole probing.
 func (e *Engine) sendWireToPeer(pr *peerRuntime, wirePkt []byte) {
 	pr.mu.RLock()
 	peerKey := pr.meta.NodeKey
 	pr.mu.RUnlock()
 
-	bestEp, bestRTT, hasDirect := e.selector.BestEndpoint(peerKey)
-	if hasDirect && e.disableUDP && bestEp.Proto == types.ProtoUDP {
-		hasDirect = false
-	}
-	meshRt, hasMesh := e.meshRouter.Lookup(peerKey)
+	decision, bestEp, _, _ := e.selectPathDecision(pr, peerKey)
 
-	// Prefer Peer-Relay Mesh if Direct is down OR Direct RTT is significantly worse (> +10ms) than Multi-Hop Mesh!
-	if hasMesh && meshRt.IsPeerRelayed && (!hasDirect || (bestRTT > 0 && meshRt.TotalCostMs+10.0 < bestRTT)) {
+	switch decision {
+	case pathDecisionDirect:
+		if err := e.hub.Send(context.Background(), bestEp, wirePkt); err == nil {
+			// Track unanswered outbound traffic; if >= 2.5s without rx, fire immediate fast probe!
+			if e.selector.RecordTx(peerKey, bestEp) {
+				e.probePeerCandidates(peerKey, []types.Endpoint{bestEp})
+			}
+			return
+		}
+		// Stream write error -> immediate fallback below!
+
+	case pathDecisionPeerMesh:
 		if e.sendViaPeerMesh(peerKey, wirePkt) == nil {
 			return
 		}
-	}
 
-	if hasDirect {
-		if err := e.hub.Send(context.Background(), bestEp, wirePkt); err == nil {
+	case pathDecisionCenterRelay:
+		if e.relayCli.Send(peerKey, wirePkt) == nil {
+			e.triggerCoordinatedHolePunch(pr)
 			return
 		}
 	}
 
-	// Try Peer-Relay Mesh before Center Relay if available
+	// Fallback cascade if primary chosen path errored
 	if e.sendViaPeerMesh(peerKey, wirePkt) == nil {
 		e.triggerCoordinatedHolePunch(pr)
 		return
 	}
-
 	_ = e.relayCli.Send(peerKey, wirePkt)
 	e.triggerCoordinatedHolePunch(pr)
 }

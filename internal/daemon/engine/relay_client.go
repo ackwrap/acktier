@@ -18,7 +18,8 @@ import (
 // DialFunc dials a stream connection (allows injecting in-memory pipes in tests).
 type DialFunc func(ctx context.Context, network, address string) (net.Conn, error)
 
-// RelayClient maintains a persistent upgraded TCP stream to an acktier-server `/relay` endpoint.
+// RelayClient maintains a persistent upgraded TCP stream to an acktier-server `/relay` endpoint
+// and continuously measures server relay RTT for global path cost comparison.
 type RelayClient struct {
 	dial      DialFunc
 	nodeKey   types.PublicKey
@@ -26,9 +27,12 @@ type RelayClient struct {
 	onRecv    func(src types.PublicKey, inner []byte)
 
 	mu        sync.RWMutex
+	writeMu   sync.Mutex
 	relayAddr string
 	conn      net.Conn
 	connected atomic.Bool
+	rttMicros atomic.Int64
+	probeSeq  atomic.Uint64
 }
 
 func NewRelayClient(dial DialFunc, nodeKey types.PublicKey, onRecv func(src types.PublicKey, inner []byte)) *RelayClient {
@@ -45,6 +49,15 @@ func NewRelayClient(dial DialFunc, nodeKey types.PublicKey, onRecv func(src type
 
 func (rc *RelayClient) Connected() bool {
 	return rc.connected.Load()
+}
+
+// RTTMillis returns the smoothed EWMA round-trip latency (in ms) between this node and the Center Relay server.
+func (rc *RelayClient) RTTMillis() float64 {
+	us := rc.rttMicros.Load()
+	if us <= 0 {
+		return 0
+	}
+	return float64(us) / 1000.0
 }
 
 func (rc *RelayClient) Run(ctx context.Context, relayAddr, nodeToken string) {
@@ -94,7 +107,6 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string) 
 		_ = conn.Close()
 	}()
 
-	// Perform HTTP/1.1 Upgrade to /relay
 	reqStr := fmt.Sprintf("GET /relay HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: acktier-relay\r\n\r\n", addr)
 	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
 	if _, err := conn.Write([]byte(reqStr)); err != nil {
@@ -109,7 +121,6 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string) 
 	if !strings.Contains(statusLine, "101") {
 		return fmt.Errorf("relay upgrade rejected: %s", strings.TrimSpace(statusLine))
 	}
-	// Consume remaining HTTP response headers until blank line
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
@@ -120,7 +131,6 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string) 
 		}
 	}
 
-	// Send RelayBind frame
 	if err := protocol.WriteFrame(conn, protocol.EncodeRelayBind(rc.nodeKey, token)); err != nil {
 		return err
 	}
@@ -139,14 +149,24 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string) 
 	rc.mu.Unlock()
 	rc.connected.Store(true)
 
-	// Watch context cancellation to unblock ReadFrame immediately
+	// Measure initial Relay Server RTT right away & keepalive every 15s
+	rc.SendServerPing()
+
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
 	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-stopWatch:
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				_ = conn.Close()
+				return
+			case <-stopWatch:
+				return
+			case <-ticker.C:
+				rc.SendServerPing()
+			}
 		}
 	}()
 
@@ -159,13 +179,43 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string) 
 		if err != nil {
 			continue
 		}
-		if pType == protocol.PacketRelayForward {
+		switch pType {
+		case protocol.PacketPong:
+			_, sender, _, txNano, _, err := protocol.DecodeProbePacket(frame)
+			if err == nil && sender == rc.nodeKey {
+				sampleUs := time.Since(time.Unix(0, txNano)).Microseconds()
+				if sampleUs < 50 {
+					sampleUs = 50
+				}
+				prev := rc.rttMicros.Load()
+				if prev <= 0 {
+					rc.rttMicros.Store(sampleUs)
+				} else {
+					rc.rttMicros.Store((prev*3 + sampleUs) / 4)
+				}
+			}
+		case protocol.PacketRelayForward:
 			_, src, dst, inner, err := protocol.DecodeRelayForward(frame)
 			if err == nil && dst == rc.nodeKey && rc.onRecv != nil {
 				rc.onRecv(src, inner)
 			}
 		}
 	}
+}
+
+// SendServerPing transmits a lightweight probe frame to measure RTT to the Center Relay server.
+func (rc *RelayClient) SendServerPing() {
+	rc.mu.RLock()
+	conn := rc.conn
+	rc.mu.RUnlock()
+	if conn == nil || !rc.connected.Load() {
+		return
+	}
+	ping := protocol.EncodeProbePacket(protocol.PacketPing, rc.nodeKey, rc.probeSeq.Add(1), time.Now().UnixNano(), "")
+	rc.writeMu.Lock()
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = protocol.WriteFrame(conn, ping)
+	rc.writeMu.Unlock()
 }
 
 func (rc *RelayClient) Send(dst types.PublicKey, inner []byte) error {
@@ -176,8 +226,11 @@ func (rc *RelayClient) Send(dst types.PublicKey, inner []byte) error {
 		return errors.New("relay not connected")
 	}
 	frame := protocol.EncodeRelayForward(protocol.DefaultHopTTL, rc.nodeKey, dst, inner)
+	rc.writeMu.Lock()
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	return protocol.WriteFrame(conn, frame)
+	err := protocol.WriteFrame(conn, frame)
+	rc.writeMu.Unlock()
+	return err
 }
 
 func (rc *RelayClient) closeCurrent() {
