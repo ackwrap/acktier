@@ -8,14 +8,14 @@
 
 | 维度 | Tailscale 模式 | EasyTier 模式 | AckTier 融合方案 |
 | :--- | :--- | :--- | :--- |
-| **控制与治理** | 中心协调端统一鉴权、IP 分配、ACL 与 MagicDNS，管理体验极佳 | 去中心化无状态组网为主，缺乏集中式企业级设备治理与统一 ACL | **中心控制面（Control Server）**：统一设备注册、PreAuthKey/OAuth 鉴权、IPAM、拓扑下发与零信任 ACL |
+| **控制与治理** | 中心协调端统一鉴权、IP 分配、ACL 与 MagicDNS，管理体验极佳 | 去中心化无状态组网为主，缺乏集中式企业级设备治理与统一 ACL | **所有者客户端授权 + 中心协调**：所选电脑签发身份、虚拟 IP、ACL 和路由；中心收集申请、分发签名和连接提示 |
 | **传输抗封锁** | 数据面强绑定 WireGuard (UDP)，遭遇运营商 UDP QoS 或严格防火墙时易退化至低速中继 | 原生支持 UDP / TCP / WSS / QUIC 等多协议传输，穿墙与抗 QoS 能力强 | **多协议可插拔传输层**：原生支持 `UDP`、`TCP`、`QUIC`、`WebSocket (WSS)` 自动测速选路与无缝切换 |
 | **中继与路由** | 仅支持官方/自建 DERP 单跳中继，无法利用优质公网对等节点中转 | 支持网状多跳路由（OSPF 类链路状态），任意公网/优质节点可协助中转 | **中心 Relay + 智能对等多跳中继（Peer Relay）**：打洞失败时自动计算全网延迟最低路径（含对等节点一跳/多跳中转） |
 | **子网与免配置转发** | 借助用户态 `netstack` 实现免改宿主机防火墙的出口与子网路由 | 内置用户态协议栈，免驱动/无感代理子网 | **混合数据栈（TUN + gVisor Netstack）**：本地虚拟网卡透明互通 + 用户态协议栈无感实现 Subnet Router 与 Exit Node |
 
 > [!IMPORTANT]
-> **核心架构原则：控制面与数据面彻底解耦**
-> 中心控制端（`acktier-server`）**绝不触碰任何用户业务流量明文**，仅负责公钥交换、虚拟 IP 分配、网络拓扑（NetMap）增量推送与安全策略下发；所有业务流量均在客户端守护进程（`acktierd`）之间基于公私钥进行 **端到端加密（E2EE）** 传输。
+> **保留中心协调，但把授权签发权留在选定的所有者客户端。**
+> 中心不持有节点私钥或所有者私钥；节点只从自己验证过的签名得出“哪个公钥对应哪个节点”。内置中继只转发密文，部署步骤见[所有者架构](OWNER_CONTROL.md)。
 
 ---
 
@@ -23,11 +23,13 @@
 
 ```mermaid
 flowchart TB
-    subgraph ControlPlane["中心控制面 (acktier-server)"]
-        AdminWeb["Web 管理控制台 (SPA 内嵌)"]
-        AuthIPAM["设备鉴权 / IPAM 地址池 / 密钥管理"]
-        MapService["NetMap 拓扑与增量长连接推送 (gRPC / HTTP2)"]
-        PolicyEngine["ACL 编译引擎 & MagicDNS 配置中心"]
+    subgraph Owner["选定的所有者客户端（可离线）"]
+        Signer["本地签发：成员、IP、ACL、DNS、子网和出口"]
+    end
+    subgraph ControlPlane["中心协调端 (acktier-server)"]
+        AdminWeb["Web 管理台：初始化、申请码、申请与签名发布"]
+        Requests["待审批设备 / 协调令牌"]
+        MapService["NDJSON：签名授权快照 + 动态连接提示"]
         EmbeddedRelay["内置 STUN & 基础中继服务 (Relay Fallback)"]
     end
 
@@ -40,7 +42,7 @@ flowchart TB
             TUN["跨平台虚拟网卡 (Wintun / Linux TUN / macOS utun)"]
             Netstack["用户态网络栈 (gVisor netstack: 子网路由 / Exit Node)"]
             MagicDNS["内嵌 MagicDNS 解析器 (100.100.100.100)"]
-            ACLFilter["状态化包过滤器 (本地执行入站/出站 ACL)"]
+            ACLFilter["客户端验签 + 状态化包过滤"]
             CryptoRouter["端到端加密引擎 (Noise / ChaCha20-Poly1305) & 多跳路由表"]
             NATDisco["NAT 穿透探测引擎 (STUN / UPnP / NAT-PMP / 主动打洞)"]
             MultiTrans["多协议传输层 (UDP / TCP / QUIC / WSS)"]
@@ -57,7 +59,9 @@ flowchart TB
         NATDisco <--> MultiTrans
     end
 
-    Daemon <==>|"控制信令 (TLS 长连接同步 NetMap)"| MapService
+    Signer -->|"上传已签文件，不上传私钥"| MapService
+    Signer -->|"通过可信渠道预置公钥"| Daemon
+    Daemon <==>|"TLS 协调与同步 NetMap"| MapService
     MultiTrans <==>|"P2P 直连 / 对等节点多跳中继 / 中心兜底中继"| PeerNode["其他对等节点 (acktierd) / Relay 节点"]
 ```
 
@@ -65,15 +69,23 @@ flowchart TB
 
 ## 3. 核心模块详细设计
 
-### 3.1 中心控制面 (`acktier-server`)
+### 3.1 所有者客户端与中心协调端 (`acktier-server`)
 1. **身份与密钥体系**
-   - **双层密钥模型**：每个节点自动生成持久化的 `MachineKey`（设备物理身份标识）与可轮换的 `NodeKey`（网络会话加密公钥），支持通过浏览器交互登录、命令行授权链接或无人值守 `PreAuthKey`（预授权密钥）接入。
-2. **IPAM（虚拟地址管理）**
-   - 默认分配 `100.64.0.0/10`（CGNAT 段，避免与常见局域网 `192.168.x.x` / `10.x.x.x` 冲突）下的固定 IPv4 地址，以及 `fd7a:115c:a1e0::/48` 下的 IPv6 ULA 地址。
-3. **实时 NetMap 增量流式同步**
-   - 客户端与控制端保持一条轻量级流式连接（HTTP/2 Connect 或 gRPC Stream）。当全网有节点上下线、公网 Endpoint 变更、宣告新子网或管理员修改 ACL 时，控制端在毫秒级将 **增量补丁（Delta NetMap）** 推送给相关受影响节点。
-4. **内置 Web 管理后台**
-   - 编译为静态资源内嵌进 `acktier-server` 单一二进制文件，支持可视化查看在线节点、延迟拓扑、审批子网路由、签发 PreAuthKey、编辑 ACL 规则与配置 MagicDNS。
+   - 节点仍本地生成 `MachineKey` 和 X25519 `NodeKey`。中心首次启动后提供 Web 初始化页，管理员在入网开放前导入所选客户端的 Ed25519 公钥。`PreAuthKey` 只允许提交协调申请。
+2. **虚拟地址与权限**
+   - 所有者为各 `NodeKey` 签发组网身份、固定地址（`100.64.0.0/10` 和可选的 `fd7a:115c:a1e0::/48`）、ACL、DNS、子网和出口批准。节点只使用已签结果。
+3. **实时 NetMap 流式同步**
+   - HTTP(S) NDJSON 传输完整签名快照和动态提示。中心可更新端点、在线状态和链路质量，不能修改签名内的策略。授权版本独立于传输版本，跨节点重启防回滚。
+4. **Web 管理后台**
+   - 已支持首次绑定所有者、查看节点与申请、管理入网申请码和上传已签快照。网页没有签发权限；所有者用本地 CLI 核对并签名。拓扑可视化和变更草稿仍是后续功能。
+
+#### 控制端失陷威胁模型
+
+**假设**：中心可被完全控制，但所有者私钥与节点本地状态未失陷；所有者公钥已通过可信渠道预置。仅有正常 TLS 证书或中心管理令牌，并不能授予组网权限。
+
+**已实现的防护**：客户端只安装有所有者签名的公钥、虚拟地址、ACL、DNS 和路由；校验组网 ID、版本及有效期，拒绝未签名变更、降级和旧版本回放。收到新版签名撤权时清理旧授权，中心拒绝服务则不视为签名撤权。
+
+**剩余风险**：中心仍能获取组网元数据、扣住新版、影响选路和停掉中继；被扣住的撤权最迟在旧签名过期后生效。生产前仍需验证多机故障与升级流程，并设计经独立渠道执行的紧急撤权及根轮换。详见[所有者架构](OWNER_CONTROL.md#失联失陷与恢复)。
 
 ### 3.2 多协议传输与智能选路 (`pkg/transport` & `pkg/magicsock`)
 为解决单一 UDP 协议在跨省/跨国或校园企业网中被限流阻断的问题，设计统一的数据帧传输抽象接口：
@@ -231,12 +243,13 @@ acktier/
 ### 阶段五：Web 管理控制台与全桌面端 GUI 客户端 (Phase 5 - UI & Desktop)
 - **目标**：交付完整的图形化管理与终端用户一键组网体验。
 - **交付内容**：
-  - 开发 `acktier-server` 内嵌 Web 管理控制台（节点管理、拓扑延迟可视化、路由审批、密钥管理、ACL 编辑器）。
+   - 扩展 `acktier-server` 内嵌 Web 管理控制台的拓扑可视化与变更草稿；审批和签发仍由所有者客户端完成。
   - 开发 Windows / macOS / Linux 全桌面图形客户端（系统托盘常驻、一键连接/断开、节点列表与直连/中继协议状态展示、一键切换 Exit Node）。
   - 完善系统后台服务（Windows Service / systemd / LaunchDaemon）开机自启与无感提权交互。
 
 ### 阶段六：性能优化、安全审计与跨平台安装包分发 (Phase 6 - Production Ready)
 - **目标**：达到生产级吞吐量、稳定性与一键安装体验。
 - **交付内容**：
+  - 验证[所有者签名架构](OWNER_CONTROL.md)的多机升级、故障和备份恢复流程，补齐独立紧急撤权与所有者根轮换。
   - 数据面零内存分配（Zero-copy buffer pool）、GSO/GRO 批量收发包优化，压测千兆以上虚拟网吞吐。
   - 自动化构建流水线：打包 Windows (`.msi` / `.exe` 含 Wintun 自动部署)、macOS (`.pkg` / `.dmg`)、Linux (`.deb` / `.rpm` / Docker 镜像)。

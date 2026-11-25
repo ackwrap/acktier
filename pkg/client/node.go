@@ -89,6 +89,8 @@ type NodeConfig struct {
 	BlackholeTimeout    time.Duration
 	NetMonitorInterval  time.Duration
 	ControlLeaseTTL     time.Duration // Stale NetMap grace period (0 uses DefaultControlLeaseTTL; minimum 1m).
+	OwnerTrustFile      string        // Out-of-band public trust configuration; pin is retained in StatePath.
+	RequireOwner        bool          // Refuse to start without a pinned owner.
 
 	// Optional custom dialers/transports for custom host environments or sandboxed testing.
 	CustomUDPConn  net.PacketConn
@@ -185,6 +187,8 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		BlackholeTimeout:    cfg.BlackholeTimeout,
 		NetMonitorInterval:  cfg.NetMonitorInterval,
 		ControlLeaseTTL:     cfg.ControlLeaseTTL,
+		OwnerTrustFile:      cfg.OwnerTrustFile,
+		RequireOwner:        cfg.RequireOwner,
 	})
 	if err != nil {
 		_ = tunDev.Close()

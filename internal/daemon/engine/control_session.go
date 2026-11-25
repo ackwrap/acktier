@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/acktier/acktier/internal/owner"
 	"github.com/acktier/acktier/pkg/types"
 )
 
@@ -39,7 +40,10 @@ func (e *Engine) acceptControlEvent(ctx context.Context, ev types.MapStreamEvent
 	}
 	switch ev.Type {
 	case "netmap":
-		if ev.NetMap == nil || !e.isOwnNetMap(*ev.NetMap) {
+		if e.ownerTrust != nil {
+			return e.acceptOwnerMapLocked(ev.NetMap)
+		}
+		if ev.NetMap == nil || ev.NetMap.OwnerNetworkID != "" || ev.NetMap.OwnerAuthorization != nil || !e.isOwnNetMap(*ev.NetMap) {
 			e.clearAuthorizationLocked()
 			return false
 		}
@@ -56,7 +60,7 @@ func (e *Engine) acceptControlEvent(ctx context.Context, ev types.MapStreamEvent
 		if ev.Revision == 0 || ev.Revision != e.netMap.Revision || !now.Before(e.controlUntil) {
 			return false
 		}
-		e.controlUntil = now.Add(e.controlLeaseTTL)
+		e.controlUntil = e.controlDeadlineLocked(now)
 		return true
 	default:
 		return false
@@ -64,7 +68,8 @@ func (e *Engine) acceptControlEvent(ctx context.Context, ev types.MapStreamEvent
 }
 
 func (e *Engine) handleControlRejection(ctx context.Context, status int) {
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+	// In owner mode the coordinator can refuse service, not revoke membership.
+	if e.ownerTrust == nil && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
 		e.invalidateControlLease(ctx, false)
 	}
 }
@@ -99,8 +104,10 @@ func (e *Engine) invalidateControlLease(ctx context.Context, onlyExpired bool) {
 // clearAuthorizationLocked leaves the control stream free to reconnect, but
 // closes the data plane until an authenticated, current snapshot is installed.
 func (e *Engine) clearAuthorizationLocked() {
+	e.ownerInstalled = owner.Checkpoint{}
 	e.mu.Lock()
 	e.controlUntil = time.Time{}
+	e.ownerExpiresAt = time.Time{}
 	e.peersByKey = make(map[types.PublicKey]*peerRuntime)
 	e.peersByIP = make(map[netip.Addr]*peerRuntime)
 	e.routeTable = nil
@@ -112,7 +119,13 @@ func (e *Engine) clearAuthorizationLocked() {
 	e.cryptoMgr.ResetSessions()
 	e.selector.Reset()
 	e.hub.ResetConnections()
-	e.pktFilter.Reset()
+	if e.ownerTrust != nil {
+		// The legacy empty rule list means allow-all. Keep owner mode
+		// default-deny even during a transition with packets in flight.
+		e.pktFilter.SetRules([]types.FilterRule{owner.DenyAll()})
+	} else {
+		e.pktFilter.Reset()
+	}
 	e.dnsResolver.UpdateNetMap(types.NetMap{})
 	e.gateway.ResetFlows()
 	e.exitFlows.Reset()

@@ -34,12 +34,13 @@ const (
 
 // Config configures the AckTier Control & Relay Server.
 type Config struct {
-	AdminToken  string
-	PublicHost  string // Hostname or IP advertised in RelayNode
-	RelayAddr   string // host:port advertised for TCP/HTTPS relay
-	STUNAddr    string // Primary UDP STUN address host:port
-	STUNAltAddr string // Secondary UDP STUN address host:port for Cone/Symmetric classification
-	UseTLS      bool   // Advertise TLS requirement for Relay connections
+	AdminToken   string
+	PublicHost   string // Hostname or IP advertised in RelayNode
+	RelayAddr    string // host:port advertised for TCP/HTTPS relay
+	STUNAddr     string // Primary UDP STUN address host:port
+	STUNAltAddr  string // Secondary UDP STUN address host:port for Cone/Symmetric classification
+	UseTLS       bool   // Advertise TLS requirement for Relay connections
+	RequireOwner bool   // Serve the Web console and disallow legacy admission. Production must set this.
 }
 
 type subscriber struct {
@@ -83,7 +84,9 @@ func NewServer(cfg Config, st *store.FileStore) *Server {
 		subscribers: make(map[uint64]*subscriber),
 	}
 	s.revision.Store(1)
-	s.relay = relay.NewServer(s.authenticateNodeToken)
+	s.relay = relay.NewServer(func(key types.PublicKey, token string) bool {
+		return !s.ownerSetupPending() && s.authenticateNodeToken(key, token) && s.store.OwnerAllowsRelay(key, time.Now())
+	})
 	return s
 }
 
@@ -103,36 +106,44 @@ func (s *Server) authenticateNodeToken(nodeKey types.PublicKey, token string) bo
 	return ok
 }
 
-// Handler returns the root HTTP mux serving Admin API, Node Control API, and `/relay` Upgrade.
+// Handler serves the Web console, Admin and Node Control APIs, and `/relay` Upgrade.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	if s.cfg.RequireOwner {
+		s.mountWebAdmin(mux)
+	}
 
 	// Public health check
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revision": s.revision.Load()})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "revision": s.revision.Load(), "ownerSetupRequired": s.ownerSetupPending(),
+		})
 	})
 
 	// Relay connection upgrade endpoint
-	mux.HandleFunc("GET /relay", s.handleRelayUpgrade)
+	mux.HandleFunc("GET /relay", s.afterOwnerSetup(s.handleRelayUpgrade))
 
 	// Node Control Plane endpoints
-	mux.HandleFunc("POST /api/v1/node/register", s.handleNodeRegister)
-	mux.HandleFunc("POST /api/v1/node/heartbeat", s.handleNodeHeartbeat)
-	mux.HandleFunc("GET /api/v1/node/map/stream", s.handleNodeMapStream)
+	mux.HandleFunc("POST /api/v1/node/register", s.afterOwnerSetup(s.handleNodeRegister))
+	mux.HandleFunc("POST /api/v1/node/heartbeat", s.afterOwnerSetup(s.handleNodeHeartbeat))
+	mux.HandleFunc("GET /api/v1/node/map/stream", s.afterOwnerSetup(s.handleNodeMapStream))
 
 	// Admin API endpoints
 	mux.HandleFunc("GET /api/v1/admin/status", s.requireAdmin(s.handleAdminStatus))
 	mux.HandleFunc("GET /api/v1/admin/nodes", s.requireAdmin(s.handleAdminListNodes))
-	mux.HandleFunc("DELETE /api/v1/admin/nodes/{id}", s.requireAdmin(s.handleAdminDeleteNode))
-	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rekey", s.requireAdmin(s.handleAdminRekeyNode))
-	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rename", s.requireAdmin(s.handleAdminRenameNode))
-	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/routes/approve", s.requireAdmin(s.handleAdminApproveRoutes))
+	mux.HandleFunc("DELETE /api/v1/admin/nodes/{id}", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminDeleteNode)))
+	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rekey", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminRekeyNode)))
+	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rename", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminRenameNode)))
+	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/routes/approve", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminApproveRoutes)))
 	mux.HandleFunc("GET /api/v1/admin/keys", s.requireAdmin(s.handleAdminListKeys))
 	mux.HandleFunc("POST /api/v1/admin/keys", s.requireAdmin(s.handleAdminCreateKey))
 	mux.HandleFunc("DELETE /api/v1/admin/keys/{id}", s.requireAdmin(s.handleAdminRevokeKey))
-	mux.HandleFunc("GET /api/v1/admin/acl", s.requireAdmin(s.handleAdminGetACL))
-	mux.HandleFunc("PUT /api/v1/admin/acl", s.requireAdmin(s.handleAdminPutACL))
-	mux.HandleFunc("PUT /api/v1/admin/dns", s.requireAdmin(s.handleAdminPutDNS))
+	mux.HandleFunc("GET /api/v1/admin/acl", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminGetACL)))
+	mux.HandleFunc("PUT /api/v1/admin/acl", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminPutACL)))
+	mux.HandleFunc("PUT /api/v1/admin/dns", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminPutDNS)))
+	mux.HandleFunc("GET /api/v1/admin/owner/requests", s.requireAdmin(s.handleOwnerRequests))
+	mux.HandleFunc("PUT /api/v1/admin/owner/authorization", s.requireAdmin(s.handleOwnerPublication))
+	mux.HandleFunc("GET /api/v1/admin/owner/authorization", s.requireAdmin(s.handleGetOwnerPublication))
 
 	return mux
 }
@@ -245,6 +256,9 @@ func (s *Server) disconnectNodeSessions(nodeKey types.PublicKey) {
 
 func (s *Server) buildNetMapFor(selfID types.NodeID) (types.NetMap, bool) {
 	revision := s.revision.Load()
+	if trust, locked := s.store.OwnerTrust(); locked {
+		return s.buildOwnerNetMap(selfID, trust.NetworkID(), revision)
+	}
 	all, dnsCfg, staticRules, pol := s.store.TopologySnapshot()
 	var self types.PeerNode
 	found := false
@@ -339,6 +353,9 @@ func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "machineKey and nodeKey are required")
 		return
 	}
+	if !s.checkOwnerNetwork(w, req.OwnerNetworkID) {
+		return
+	}
 	if len(req.AdvertisedRoutes) > maxRoutesPerNode {
 		req.AdvertisedRoutes = req.AdvertisedRoutes[:maxRoutesPerNode]
 	}
@@ -365,7 +382,11 @@ func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 	if !oldKey.IsZero() {
 		s.disconnectNodeSessions(oldKey)
 	}
-	log.Printf("[control] registered node #%d (%s) -> %s", sn.Node.ID, sn.Node.Name, sn.Node.IPv4)
+	if req.OwnerNetworkID != "" {
+		log.Printf("[control] registered coordination record #%d (%s)", sn.Node.ID, sn.Node.Name)
+	} else {
+		log.Printf("[control] registered node #%d (%s) -> %s", sn.Node.ID, sn.Node.Name, sn.Node.IPv4)
+	}
 
 	s.broadcastTopologyChange()
 	nm, ok := s.buildNetMapFor(sn.Node.ID)
@@ -389,6 +410,9 @@ func (s *Server) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var req types.HeartbeatRequest
 	if err := decodeBoundedJSON(w, r, maxControlJSONBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or oversized json")
+		return
+	}
+	if !s.checkOwnerNetwork(w, req.OwnerNetworkID) {
 		return
 	}
 	cleanEps := sanitizeEndpoints(req.Endpoints)
@@ -485,6 +509,9 @@ func (s *Server) handleNodeMapStream(w http.ResponseWriter, r *http.Request) {
 	nodeKey, err := types.ParsePublicKey(nodeKeyStr)
 	if err != nil || nodeKey.IsZero() {
 		writeError(w, http.StatusBadRequest, "invalid nodeKey query parameter")
+		return
+	}
+	if !s.checkOwnerNetwork(w, r.URL.Query().Get("ownerNetworkId")) {
 		return
 	}
 	if r.ContentLength != 0 {
@@ -690,6 +717,11 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminListNodes(w http.ResponseWriter, r *http.Request) {
+	if _, locked := s.store.OwnerTrust(); locked {
+		_, verified, records := s.store.OwnerTopology()
+		writeJSON(w, http.StatusOK, ownerMembers(verified, records))
+		return
+	}
 	stored := s.store.ListNodes()
 	nodes := make([]types.PeerNode, 0, len(stored))
 	for _, sn := range stored {

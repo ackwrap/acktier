@@ -206,6 +206,25 @@ type NetMap struct {
 	PacketFilter []FilterRule `json:"packetFilter,omitempty"`
 	DNS          DNSConfig    `json:"dns"`
 	UpdatedAt    time.Time    `json:"updatedAt"`
+
+	// In owner-locked networks, only the signed authorization supplies
+	// identities and policy. The rest of the map carries connection hints.
+	OwnerNetworkID     string              `json:"ownerNetworkId,omitempty"`
+	OwnerAuthorization *OwnerAuthorization `json:"ownerAuthorization,omitempty"`
+}
+
+// OwnerAuthorization carries the exact payload bytes signed by the network owner.
+type OwnerAuthorization struct {
+	Payload   []byte `json:"payload"`
+	Signature []byte `json:"signature"`
+}
+
+// OwnerJoinRequest is unverified registration metadata for owner review.
+type OwnerJoinRequest struct {
+	NodeKey          PublicKey      `json:"nodeKey"`
+	Hostname         string         `json:"hostname"`
+	OS               string         `json:"os,omitempty"`
+	AdvertisedRoutes []netip.Prefix `json:"advertisedRoutes,omitempty"`
 }
 
 // PreAuthKey allows unattended or automated node registration onto the control plane.
@@ -233,6 +252,7 @@ type RegisterRequest struct {
 	AdvertisedRoutes []netip.Prefix `json:"advertisedRoutes,omitempty"`
 	CanRelay         bool           `json:"canRelay,omitempty"`
 	PreferredRelayID string         `json:"preferredRelayId,omitempty"`
+	OwnerNetworkID   string         `json:"ownerNetworkId,omitempty"`
 }
 
 // RegisterResponse returns the node token and initial NetMap upon registration.
@@ -249,6 +269,7 @@ type HeartbeatRequest struct {
 	AdvertisedRoutes []netip.Prefix `json:"advertisedRoutes,omitempty"`
 	CanRelay         bool           `json:"canRelay,omitempty"`
 	PreferredRelayID string         `json:"preferredRelayId,omitempty"`
+	OwnerNetworkID   string         `json:"ownerNetworkId,omitempty"`
 }
 
 // MapStreamEvent is streamed over NDJSON from acktier-server to acktierd.

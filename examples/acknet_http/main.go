@@ -16,14 +16,25 @@ func main() {
 	mode := flag.String("mode", "server", "Run mode: server | client")
 	ctrlURL := flag.String("server", "http://127.0.0.1:8080", "AckTier Control Server URL")
 	authKey := flag.String("auth-key", "", "PreAuthKey from acktier-server")
+	trust := flag.String("owner-trust", "", "Public trust file from the network owner")
+	stateDir := flag.String("state-dir", "", "Persistent node state directory (defaults to a separate directory per mode)")
 	target := flag.String("target", "http://demo-http-srv.ack.internal:8080/ping", "Target URL for client mode")
 	flag.Parse()
+	if *mode != "server" && *mode != "client" {
+		log.Fatal("mode must be server or client")
+	}
+	if *stateDir == "" {
+		*stateDir = "./data/acknet-http-" + *mode
+	}
 
 	if *mode == "server" {
 		srv := &acknet.Server{
-			Hostname:   "demo-http-srv",
-			ControlURL: *ctrlURL,
-			AuthKey:    *authKey,
+			Hostname:       "demo-http-srv",
+			ControlURL:     *ctrlURL,
+			AuthKey:        *authKey,
+			StateDir:       *stateDir,
+			OwnerTrustFile: *trust,
+			RequireOwner:   true,
 		}
 		defer srv.Close()
 
@@ -42,9 +53,12 @@ func main() {
 	}
 
 	cli := &acknet.Server{
-		Hostname:   "demo-http-cli",
-		ControlURL: *ctrlURL,
-		AuthKey:    *authKey,
+		Hostname:       "demo-http-cli",
+		ControlURL:     *ctrlURL,
+		AuthKey:        *authKey,
+		StateDir:       *stateDir,
+		OwnerTrustFile: *trust,
+		RequireOwner:   true,
 	}
 	defer cli.Close()
 

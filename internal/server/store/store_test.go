@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -107,5 +108,33 @@ func TestConcurrentEnrollmentKeepsUniqueIdentity(t *testing.T) {
 	wg.Wait()
 	if admitted.Load() != 1 || len(st.ListNodes()) != 1 || st.ListPreAuthKeys()[0].UsedCount != 1 {
 		t.Fatal("concurrent registration was not a single transaction")
+	}
+}
+
+func TestApplicationKeyChangesRequirePersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.json")
+	st, err := store.NewFileStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := st.CreatePreAuthKey("existing", false, false, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, filepath.Join(dir, "backup.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreatePreAuthKey("unsaved", false, false, nil, time.Hour); err == nil {
+		t.Fatal("created an application key without saving it")
+	}
+	if err := st.RevokePreAuthKey(key.ID); err == nil {
+		t.Fatal("revoked an application key without saving it")
+	}
+	if keys := st.ListPreAuthKeys(); len(keys) != 1 || keys[0].ID != key.ID || keys[0].Revoked {
+		t.Fatal("failed file writes changed the application key list")
 	}
 }

@@ -12,10 +12,14 @@ import (
 
 func main() {
 	ctrlURL := flag.String("server", "http://127.0.0.1:8080", "AckTier Control Server URL")
-	authKey := flag.String("auth-key", "", "PreAuthKey")
+	authKey := flag.String("auth-key", "", "PreAuthKey for submitting a join request")
+	trust := flag.String("owner-trust", "", "Public trust file from the network owner")
+	statePath := flag.String("state", "./data/sdk-node.json", "Persistent node state")
 	flag.Parse()
 
-	cfg := client.DefaultNodeConfig("") // Empty StatePath = ephemeral in-memory identity
+	cfg := client.DefaultNodeConfig(*statePath)
+	cfg.OwnerTrustFile = *trust
+	cfg.RequireOwner = true
 	cfg.Hostname = "sdk-embedded-node"
 	cfg.TUNMode = client.TUNMemory
 

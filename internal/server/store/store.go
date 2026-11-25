@@ -49,13 +49,15 @@ type snapshot struct {
 	ACLPolicy   types.ACLPolicy             `json:"aclPolicy"`
 	FilterRules []types.FilterRule          `json:"filterRules,omitempty"`
 	DNS         types.DNSConfig             `json:"dns"`
+	Owner       *storedOwner                `json:"owner,omitempty"`
 }
 
 // FileStore provides concurrency-safe persistent storage backed by owner-only atomic JSON snapshots.
 type FileStore struct {
-	mu   sync.RWMutex
-	path string
-	data snapshot
+	mu    sync.RWMutex
+	path  string
+	data  snapshot
+	owner ownerPublication
 }
 
 func NewFileStore(path string) (*FileStore, error) {
@@ -94,6 +96,9 @@ func NewFileStore(path string) (*FileStore, error) {
 		s.ensureUniqueNodeNamesLocked()
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
+	}
+	if err := s.restoreOwner(); err != nil {
+		return nil, fmt.Errorf("restore owner authorization: %w", err)
 	}
 	return s, nil
 }
@@ -454,7 +459,6 @@ func (s *FileStore) CreatePreAuthKey(label string, reusable, ephemeral bool, tag
 	}
 	now := time.Now().UTC()
 	pak := types.PreAuthKey{
-		ID:        "key_" + randomHex(6),
 		Key:       "ackkey-" + randomHex(20),
 		Label:     label,
 		Reusable:  reusable,
@@ -463,8 +467,18 @@ func (s *FileStore) CreatePreAuthKey(label string, reusable, ephemeral bool, tag
 		ExpiresAt: now.Add(ttl),
 		CreatedAt: now,
 	}
+	for {
+		pak.ID = "key_" + randomHex(6)
+		if _, exists := s.data.PreAuthKeys[pak.ID]; !exists {
+			break
+		}
+	}
 	s.data.PreAuthKeys[pak.ID] = pak
-	return pak, s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		delete(s.data.PreAuthKeys, pak.ID)
+		return types.PreAuthKey{}, err
+	}
+	return pak, nil
 }
 
 func (s *FileStore) findPreAuthKeyLocked(rawKey string) (types.PreAuthKey, error) {
@@ -507,9 +521,14 @@ func (s *FileStore) RevokePreAuthKey(id string) error {
 	if !ok {
 		return ErrNotFound
 	}
-	pak.Revoked = true
-	s.data.PreAuthKeys[id] = pak
-	return s.saveLocked()
+	next := pak
+	next.Revoked = true
+	s.data.PreAuthKeys[id] = next
+	if err := s.saveLocked(); err != nil {
+		s.data.PreAuthKeys[id] = pak
+		return err
+	}
+	return nil
 }
 
 func (s *FileStore) GetACLPolicy() types.ACLPolicy {

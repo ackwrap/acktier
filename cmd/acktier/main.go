@@ -52,6 +52,8 @@ func main() {
 		runAdminRoute(args)
 	case "acl":
 		runAdminACL(args)
+	case "owner":
+		runOwner(args)
 	default:
 		printUsage()
 		os.Exit(1)
@@ -72,7 +74,8 @@ Usage:
   acktier ping <peer-name-or-ip> [-c <count>]
   acktier key create --server <https-url> --admin-token <token> [--tls-ca <ca.pem>] [--reusable] [--label <name>]
   acktier route approve --server <https-url> --admin-token <token> [--tls-ca <ca.pem>] --node <id> --routes <cidr,...>
-  acktier acl set --server <https-url> --admin-token <token> [--tls-ca <ca.pem>] --file <policy.json>`)
+  acktier acl set --server <https-url> --admin-token <token> [--tls-ca <ca.pem>] --file <policy.json>
+  acktier owner init|node-key|requests|sign|publish [flags]`)
 }
 
 func runUp(apiBase string, args []string) {

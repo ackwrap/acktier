@@ -63,6 +63,7 @@ type ConfigState struct {
 	MaxRelayMbps     float64           `json:"maxRelayMbps,omitempty"`
 	CanRelay         bool              `json:"canRelay,omitempty"`
 	WantRunning      bool              `json:"wantRunning,omitempty"`
+	Owner            *OwnerState       `json:"owner,omitempty"`
 }
 
 type Manager struct {
@@ -134,6 +135,10 @@ func (m *Manager) Get() ConfigState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	cp := m.state
+	if cp.Owner != nil {
+		owner := *cp.Owner
+		cp.Owner = &owner
+	}
 	cp.AdvertisedRoutes = append([]netip.Prefix(nil), m.state.AdvertisedRoutes...)
 	if len(m.state.NodeTokens) > 0 {
 		cp.NodeTokens = make(map[string]string, len(m.state.NodeTokens))

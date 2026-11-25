@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/acktier/acktier/internal/owner"
 	"github.com/acktier/acktier/internal/secfile"
 	"github.com/acktier/acktier/internal/server/control"
 	"github.com/acktier/acktier/internal/server/relay"
@@ -66,6 +67,7 @@ func main() {
 		insecureHTTP = flag.Bool("insecure-http", false, "Allow plaintext HTTP on non-loopback interfaces (UNSAFE for production)")
 		credsFile    = flag.String("credentials-file", "", "Owner-only file path to write generated AdminToken / bootstrap PreAuthKey")
 		printCreds   = flag.Bool("print-credentials", false, "Print full generated credentials to stdout (local debugging only)")
+		ownerTrust   = flag.String("owner-trust", "", "Preconfigure the selected owner's public trust JSON instead of using Web setup")
 	)
 	flag.Parse()
 
@@ -88,6 +90,9 @@ func main() {
 	st, err := store.NewFileStore(*dataPath)
 	if err != nil {
 		log.Fatalf("failed to open store: %v", err)
+	}
+	if err := configureOwner(st, *ownerTrust); err != nil {
+		log.Fatal(err)
 	}
 
 	var bootstrapKey string
@@ -150,12 +155,13 @@ func main() {
 	}
 
 	ctrl := control.NewServer(control.Config{
-		AdminToken:  *adminToken,
-		PublicHost:  *publicHost,
-		RelayAddr:   advRelayAddr,
-		STUNAddr:    advSTUNAddr,
-		STUNAltAddr: advSTUNAltAddr,
-		UseTLS:      useTLS,
+		AdminToken:   *adminToken,
+		PublicHost:   *publicHost,
+		RelayAddr:    advRelayAddr,
+		STUNAddr:     advSTUNAddr,
+		STUNAltAddr:  advSTUNAltAddr,
+		UseTLS:       useTLS,
+		RequireOwner: true,
 	}, st)
 
 	httpSrv := &http.Server{
@@ -169,7 +175,6 @@ func main() {
 			MinVersion: tls.VersionTLS12,
 		},
 	}
-
 	scheme := "http"
 	if useTLS {
 		scheme = "https"
@@ -177,6 +182,12 @@ func main() {
 	fmt.Println("============================================================")
 	fmt.Printf(" AckTier Control & Relay Server\n")
 	fmt.Printf(" Listen %s/Relay : %s (advertised: %s, tls=%v)\n", strings.ToUpper(scheme), *listenAddr, advRelayAddr, useTLS)
+	fmt.Printf(" Admin console      : %s://%s/admin/\n", scheme, *listenAddr)
+	if trust, pinned := st.OwnerTrust(); pinned {
+		fmt.Printf(" Owner network      : %s\n", trust.NetworkID())
+	} else {
+		fmt.Println(" Owner network      : awaiting Web setup (node admission is paused)")
+	}
 	if advSTUNAddr != "" {
 		fmt.Printf(" Listen UDP STUN    : %s / alt %s\n", advSTUNAddr, advSTUNAltAddr)
 	}
@@ -219,4 +230,18 @@ func main() {
 		_ = stunAltConn.Close()
 	}
 	_ = httpSrv.Close()
+}
+
+func configureOwner(st *store.FileStore, trustPath string) error {
+	if trustPath == "" {
+		return nil // The Web console handles first-run setup.
+	}
+	trust, err := owner.LoadTrust(trustPath)
+	if err != nil {
+		return fmt.Errorf("read owner trust: %w", err)
+	}
+	if err := st.ConfigureOwner(trust); err != nil {
+		return fmt.Errorf("pin owner trust: %w", err)
+	}
+	return nil
 }

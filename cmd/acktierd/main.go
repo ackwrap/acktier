@@ -52,6 +52,7 @@ func main() {
 		tlsCAFile         = flag.String("tls-ca", os.Getenv("ACKTIER_TLS_CA"), "Optional Root CA PEM file for verifying Control & Relay TLS")
 		allowInsecureHTTP = flag.Bool("insecure-http", false, "Allow plaintext HTTP/Relay to non-loopback server (lab testing only)")
 		controlLeaseTTL   = flag.Duration("control-lease-ttl", client.DefaultControlLeaseTTL, "How long to keep the last authorized NetMap without control updates (minimum 1m)")
+		ownerTrust        = flag.String("owner-trust", "", "Owner trust.json received from the selected owner (required unless already pinned)")
 	)
 	flag.Parse()
 
@@ -71,6 +72,8 @@ func main() {
 	cfg.TLSCAFile = *tlsCAFile
 	cfg.AllowInsecureHTTP = *allowInsecureHTTP
 	cfg.ControlLeaseTTL = *controlLeaseTTL
+	cfg.OwnerTrustFile = *ownerTrust
+	cfg.RequireOwner = true
 	cfg.LocalAPIAddr = *apiAddr
 
 	node, err := client.NewNode(cfg)

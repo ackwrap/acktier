@@ -13,6 +13,8 @@ AckTier 将全部客户端能力封装为两个对外公开、零 `internal` 泄
 
 无需安装 `Wintun` 驱动、无需 `sudo`/管理员权限、不修改宿主机路由表，几行代码即可让普通 Go 程序获得专属虚拟 IP（`100.64.x.y`）、端到端加密、多协议抗封锁传输（UDP/TCP/QUIC/WSS）、智能多跳中继与 MagicDNS 解析能力：
 
+加入已部署的中心时，先按[所有者架构](OWNER_CONTROL.md)取得可信的 `trust.json` 并提交申请。SDK 节点需要持久状态；`AuthKey` 只允许提交申请，不代替签名批准。
+
 ### 1.1 在组网内暴露 HTTP / RPC 服务 (`srv.Listen`)
 
 ```go
@@ -28,10 +30,12 @@ import (
 
 func main() {
 	srv := &acknet.Server{
-		Hostname:   "order-service",
-		ControlURL: "http://127.0.0.1:8080",
-		AuthKey:    "ackkey-your-preauth-key",
-		StateDir:   "./data/order-service", // 留空则为纯内存临时节点
+		Hostname:       "order-service",
+		ControlURL:     "http://127.0.0.1:8080",
+		AuthKey:        "ackkey-your-preauth-key",
+		StateDir:       "./data/order-service",
+		OwnerTrustFile: "./trust.json",
+		RequireOwner:   true,
 	}
 	defer srv.Close()
 
@@ -54,9 +58,12 @@ func main() {
 
 ```go
 cliNode := &acknet.Server{
-	Hostname:   "api-caller",
-	ControlURL: "http://127.0.0.1:8080",
-	AuthKey:    "ackkey-your-preauth-key",
+	Hostname:       "api-caller",
+	ControlURL:     "http://127.0.0.1:8080",
+	AuthKey:        "ackkey-your-preauth-key",
+	StateDir:       "./data/api-caller",
+	OwnerTrustFile: "./trust.json",
+	RequireOwner:   true,
 }
 defer cliNode.Close()
 
@@ -80,6 +87,8 @@ socksLn, err := cliNode.ListenSOCKS5("127.0.0.1:1080")
 cfg := client.DefaultNodeConfig("./data/my-client.json")
 cfg.Hostname = "my-workstation"
 cfg.TUNMode = client.TUNAuto // 自动尝试系统 Wintun/TUN/utun，无权限时回退内存网卡
+cfg.OwnerTrustFile = "./trust.json"
+cfg.RequireOwner = true
 
 node, err := client.NewNode(cfg)
 if err != nil {
@@ -100,7 +109,7 @@ nm, err := node.Up(ctx, client.UpOptions{
 })
 ```
 
-控制端暂时失联时，节点默认保留最后确认的拓扑和 ACL 最多 4 小时。可通过 `client.NodeConfig.ControlLeaseTTL` 或 `acknet.Server.ControlLeaseTTL` 调整（`0` 使用默认值，最短 `time.Minute`）；当前会话收到 `401` / `403` 时仍会立即撤权。
+节点状态已固定公钥后可省略 `OwnerTrustFile`，不能自动退回无签名模式。控制端暂时失联时，默认保留最后确认的授权最多 4 小时，且不超过签名有效期。可以通过 `ControlLeaseTTL` 调整（`0` 使用默认值，最短 `time.Minute`）。所有者签名撤权会立即生效；中心 `401` / `403` 不属于签名撤权。
 
 ### 2.2 控制本地 `acktierd` 守护进程 (`client.DaemonClient`)
 
@@ -117,6 +126,7 @@ pingRes, _ := dc.Ping(ctx, "order-service", 3*time.Second)
 ```go
 admin := client.NewAdminClient("http://127.0.0.1:8080", "adm_token", nil)
 key, _ := admin.CreatePreAuthKey(ctx, client.CreateKeyOptions{Label: "ci-worker", Reusable: true})
-nodes, _ := admin.ListNodes(ctx)
-_, _ = admin.ApproveRoutes(ctx, nodes[0].ID, []netip.Prefix{netip.MustParsePrefix("192.168.50.0/24")})
+requests, _ := admin.OwnerJoinRequests(ctx) // 核对公钥，不要按名字盲签
+// env 是从所有者本地签发的 authorization.json 读取的 types.OwnerAuthorization。
+version, err := admin.PublishOwnerAuthorization(ctx, env)
 ```

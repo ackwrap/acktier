@@ -41,6 +41,8 @@ type Server struct {
 	TLSCAFile          string        // Optional PEM Root CA bundle for verifying Control & Center Relay TLS
 	AllowInsecureHTTP  bool          // Explicitly allow plaintext HTTP/Relay to non-loopback servers (lab testing only)
 	ControlLeaseTTL    time.Duration // Stale NetMap grace period (0 uses client.DefaultControlLeaseTTL; minimum 1m).
+	OwnerTrustFile     string        // Out-of-band public trust file; requires StateDir.
+	RequireOwner       bool          // Refuse to start without a pinned owner.
 
 	// Optional transport/gateway overrides for custom environments or testing.
 	CustomUDPConn      net.PacketConn
@@ -81,6 +83,8 @@ func (s *Server) ensureNodeLocked() error {
 		TLSCAFile:          s.TLSCAFile,
 		AllowInsecureHTTP:  s.AllowInsecureHTTP,
 		ControlLeaseTTL:    s.ControlLeaseTTL,
+		OwnerTrustFile:     s.OwnerTrustFile,
+		RequireOwner:       s.RequireOwner,
 		CustomUDPConn:      s.CustomUDPConn,
 		HTTPClient:         s.HTTPClientOverride,
 		RelayDial:          s.RelayDial,
