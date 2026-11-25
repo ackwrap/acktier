@@ -66,12 +66,13 @@ func (r *Resolver) UpdateNetMap(nm types.NetMap) {
 			ipv4: n.IPv4,
 			ipv6: n.IPv6,
 		}
-		byName[short] = rec
-		byName[fqdnNoDot] = rec
-		if n.Hostname != "" {
-			hn := strings.ToLower(strings.TrimSpace(n.Hostname))
-			byName[hn] = rec
-			byName[hn+"."+sfx] = rec
+		// Only register server-assigned unique Node.Name (never untrusted self-reported Hostname),
+		// and refuse overwriting existing entries as defense-in-depth.
+		if _, exists := byName[short]; !exists {
+			byName[short] = rec
+		}
+		if _, exists := byName[fqdnNoDot]; !exists {
+			byName[fqdnNoDot] = rec
 		}
 		if n.IPv4.IsValid() {
 			byIP[n.IPv4] = fqdnDot

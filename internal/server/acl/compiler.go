@@ -19,8 +19,32 @@ type portRange struct {
 	end   uint16
 }
 
-// Validate checks syntax of an ACLPolicy before saving it to the store.
+// Validate checks syntax and security invariants of an ACLPolicy before saving it to the store.
+// Self-reported node names / hostnames are rejected: ACLs must reference immutable node IDs, nodekeys,
+// admin-assigned tags, admin-defined groups/hosts, or explicit IPs/CIDRs.
 func Validate(pol types.ACLPolicy) error {
+	for alias, val := range pol.Hosts {
+		if strings.TrimSpace(alias) == "" {
+			return fmt.Errorf("acl hosts: empty host alias")
+		}
+		if len(parseIPOrPrefix(strings.TrimSpace(val))) == 0 {
+			return fmt.Errorf("acl hosts[%q]: invalid IP or CIDR %q", alias, val)
+		}
+	}
+	for grp, members := range pol.Groups {
+		if !strings.HasPrefix(grp, "group:") || len(strings.TrimPrefix(grp, "group:")) == 0 {
+			return fmt.Errorf("acl groups: group name %q must start with 'group:'", grp)
+		}
+		for _, m := range members {
+			if strings.HasPrefix(strings.TrimSpace(m), "group:") {
+				return fmt.Errorf("acl groups[%q]: nested group reference %q is not allowed", grp, m)
+			}
+			if err := validatePrincipalSelector(m, pol, true); err != nil {
+				return fmt.Errorf("acl groups[%q] member %q: %w", grp, m, err)
+			}
+		}
+	}
+
 	for i, entry := range pol.ACLs {
 		act := strings.ToLower(strings.TrimSpace(entry.Action))
 		if act != "" && act != "accept" && act != "drop" {
@@ -32,8 +56,17 @@ func Validate(pol types.ACLPolicy) error {
 		if _, err := parseProtos(entry.Proto); err != nil {
 			return fmt.Errorf("acl rule #%d: %w", i+1, err)
 		}
+		for _, s := range entry.Src {
+			if err := validatePrincipalSelector(s, pol, true); err != nil {
+				return fmt.Errorf("acl rule #%d src %q: %w", i+1, s, err)
+			}
+		}
 		for _, d := range entry.Dst {
-			if _, _, err := splitDstAndPorts(d); err != nil {
+			sel, _, err := splitDstAndPorts(d)
+			if err != nil {
+				return fmt.Errorf("acl rule #%d dst %q: %w", i+1, d, err)
+			}
+			if err := validatePrincipalSelector(sel, pol, false); err != nil {
 				return fmt.Errorf("acl rule #%d dst %q: %w", i+1, d, err)
 			}
 		}
@@ -41,10 +74,69 @@ func Validate(pol types.ACLPolicy) error {
 	return nil
 }
 
+func validatePrincipalSelector(sel string, pol types.ACLPolicy, isSrc bool) error {
+	sel = strings.TrimSpace(sel)
+	if sel == "*" {
+		return nil
+	}
+	if strings.EqualFold(sel, "autogroup:internet") {
+		if isSrc {
+			return fmt.Errorf("autogroup:internet cannot be used as src")
+		}
+		return nil
+	}
+	if _, ok := pol.Hosts[sel]; ok {
+		return nil
+	}
+	if strings.HasPrefix(sel, "group:") {
+		if _, ok := pol.Groups[sel]; !ok {
+			return fmt.Errorf("undefined group %q", sel)
+		}
+		return nil
+	}
+	if strings.HasPrefix(sel, "tag:") {
+		if len(strings.TrimSpace(strings.TrimPrefix(sel, "tag:"))) == 0 {
+			return fmt.Errorf("empty tag selector")
+		}
+		return nil
+	}
+	if _, ok := parseNodeIDSelector(sel); ok {
+		return nil
+	}
+	if strings.HasPrefix(sel, "nodekey:") {
+		pk, err := types.ParsePublicKey(sel)
+		if err != nil || pk.IsZero() {
+			return fmt.Errorf("invalid nodekey selector %q", sel)
+		}
+		return nil
+	}
+	if len(parseIPOrPrefix(sel)) > 0 {
+		return nil
+	}
+	return fmt.Errorf("untrusted node-name selector %q is not allowed; use tag:<name>, node:<id>, nodekey:<hex>, group:<name>, hosts alias, or IP/CIDR", sel)
+}
+
+func parseNodeIDSelector(sel string) (types.NodeID, bool) {
+	lower := strings.ToLower(strings.TrimSpace(sel))
+	var rawID string
+	if strings.HasPrefix(lower, "node:") {
+		rawID = strings.TrimPrefix(lower, "node:")
+	} else if strings.HasPrefix(lower, "id:") {
+		rawID = strings.TrimPrefix(lower, "id:")
+	} else {
+		return 0, false
+	}
+	id, err := strconv.ParseUint(strings.TrimSpace(rawID), 10, 64)
+	if err != nil || id == 0 {
+		return 0, false
+	}
+	return types.NodeID(id), true
+}
+
 // CompileForNode compiles the global ACLPolicy into minimal FilterRules relevant to targetNode.
 // When pol.ACLs is empty, returns nil (signaling default allow-all overlay mode).
 // When pol.ACLs is non-empty, Zero-Trust default-deny applies unless an explicit rule matches!
-func CompileForNode(pol types.ACLPolicy, self types.PeerNode, allNodes []types.PeerNode) []types.FilterRule {
+func CompileForNode(pol types.ACLPolicy, _ types.PeerNode, allNodes []types.PeerNode) []types.FilterRule {
 	if len(pol.ACLs) == 0 {
 		return nil
 	}
@@ -94,8 +186,7 @@ func CompileForNode(pol types.ACLPolicy, self types.PeerNode, allNodes []types.P
 		}
 	}
 
-	// Ensure explicit trailing default-drop sentinel when ACLs are active so even if every rule matched
-	// another node, the client knows ACL enforcement is enabled (non-empty slice).
+	// Trailing default-drop sentinel ensures Zero-Trust default-deny whenever ACLs are active.
 	out = append(out, types.FilterRule{
 		Action:      types.FilterDrop,
 		SrcPrefixes: []netip.Prefix{allIPv4, allIPv6},
@@ -128,7 +219,6 @@ func splitDstAndPorts(raw string) (selector string, ranges []portRange, err erro
 	if raw == "*" || raw == "*:*" {
 		return "*", []portRange{{0, 65535}}, nil
 	}
-	// If the whole string is a bare IP address or CIDR (notably unbracketed IPv6), there is no port suffix.
 	if _, aErr := netip.ParseAddr(raw); aErr == nil {
 		return raw, []portRange{{0, 65535}}, nil
 	}
@@ -139,8 +229,18 @@ func splitDstAndPorts(raw string) (selector string, ranges []portRange, err erro
 	if idx <= 0 {
 		return raw, []portRange{{0, 65535}}, nil
 	}
-	selector = strings.Trim(raw[:idx], "[]")
+	// Check if raw without port is `node:<id>` or `tag:<name>` without port (e.g. "tag:dev" or "node:2")
+	// Note: "tag:dev" has idx=3, raw[idx+1:]="dev" which is NOT a port! Wait: in ACL Dst syntax,
+	// "tag:dev:80" has LastIndex(':') at ":80"; what if someone writes Dst=["tag:dev"] or Dst=["node:2"]?
+	// Let's handle bare principal selectors without a trailing port cleanly!
 	portSpec := strings.TrimSpace(raw[idx+1:])
+	prefixPart := raw[:idx]
+	if !strings.Contains(prefixPart, ":") && (strings.EqualFold(prefixPart, "tag") || strings.EqualFold(prefixPart, "group") || strings.EqualFold(prefixPart, "node") || strings.EqualFold(prefixPart, "id") || strings.EqualFold(prefixPart, "nodekey") || strings.EqualFold(prefixPart, "autogroup")) {
+		// Entire string is e.g. "tag:dev", "node:1", "autogroup:internet" with no `:port` suffix!
+		return raw, []portRange{{0, 65535}}, nil
+	}
+
+	selector = strings.Trim(prefixPart, "[]")
 	if portSpec == "*" || portSpec == "" {
 		return selector, []portRange{{0, 65535}}, nil
 	}
@@ -167,16 +267,14 @@ func splitDstAndPorts(raw string) (selector string, ranges []portRange, err erro
 
 func resolveSelector(sel string, pol types.ACLPolicy, nodes []types.PeerNode, isSrc bool) []netip.Prefix {
 	sel = strings.TrimSpace(sel)
-	if sel == "*" || strings.EqualFold(sel, "autogroup:internet") && !isSrc {
+	if sel == "*" || (strings.EqualFold(sel, "autogroup:internet") && !isSrc) {
 		return []netip.Prefix{allIPv4, allIPv6}
 	}
 
-	// Named host alias?
 	if hostVal, ok := pol.Hosts[sel]; ok {
-		return parseIPOrPrefix(hostVal)
+		return parseIPOrPrefix(strings.TrimSpace(hostVal))
 	}
 
-	// Group expansion?
 	if strings.HasPrefix(sel, "group:") {
 		members := pol.Groups[sel]
 		var out []netip.Prefix
@@ -188,7 +286,6 @@ func resolveSelector(sel string, pol types.ACLPolicy, nodes []types.PeerNode, is
 		return out
 	}
 
-	// Tag selector?
 	if strings.HasPrefix(sel, "tag:") {
 		var out []netip.Prefix
 		for _, n := range nodes {
@@ -199,19 +296,32 @@ func resolveSelector(sel string, pol types.ACLPolicy, nodes []types.PeerNode, is
 		return out
 	}
 
-	// Direct IP or CIDR?
+	if targetID, ok := parseNodeIDSelector(sel); ok {
+		for _, n := range nodes {
+			if n.ID == targetID {
+				return nodePrefixes(n, !isSrc)
+			}
+		}
+		return nil
+	}
+
+	if strings.HasPrefix(strings.ToLower(sel), "nodekey:") {
+		if pk, err := types.ParsePublicKey(sel); err == nil && !pk.IsZero() {
+			for _, n := range nodes {
+				if n.NodeKey == pk {
+					return nodePrefixes(n, !isSrc)
+				}
+			}
+		}
+		return nil
+	}
+
 	if pfxs := parseIPOrPrefix(sel); len(pfxs) > 0 {
 		return pfxs
 	}
 
-	// Node name or hostname match
-	var out []netip.Prefix
-	for _, n := range nodes {
-		if strings.EqualFold(n.Name, sel) || strings.EqualFold(n.Hostname, sel) {
-			out = append(out, nodePrefixes(n, !isSrc)...)
-		}
-	}
-	return out
+	// Self-reported node names / hostnames are intentionally never matched here.
+	return nil
 }
 
 func nodePrefixes(n types.PeerNode, includeApprovedSubnets bool) []netip.Prefix {
@@ -223,7 +333,12 @@ func nodePrefixes(n types.PeerNode, includeApprovedSubnets bool) []netip.Prefix 
 		out = append(out, netip.PrefixFrom(n.IPv6, 128))
 	}
 	if includeApprovedSubnets {
-		out = append(out, n.ApprovedRoutes...)
+		for _, rt := range n.ApprovedRoutes {
+			// Default routes (0.0.0.0/0, ::/0) represent Exit Node capability and require explicit `*` or `autogroup:internet` ACLs.
+			if rt.Bits() > 0 && !types.OverlapsOverlayOrSpecial(rt) {
+				out = append(out, rt)
+			}
+		}
 	}
 	return out
 }

@@ -62,7 +62,7 @@ func printUsage() {
 	fmt.Println(`AckTier CLI - Next-Gen Overlay Mesh Networking
 
 Usage:
-  acktier up --server <url> [--auth-key <key>] [--hostname <name>] [--can-relay] [--advertise-routes <cidr,...>] [--advertise-exit-node] [--exit-node <peer>]
+  acktier up --server <https-url> [--auth-key <key>] [--hostname <name>] [--relay-mode auto|on|off] [--advertise-routes <cidr,...>] [--advertise-exit-node] [--exit-node <peer>]
   acktier down
   acktier status [--json]
   acktier mesh [--json]
@@ -70,23 +70,24 @@ Usage:
   acktier dns <hostname>
   acktier exit-node <peer-name-or-none>
   acktier ping <peer-name-or-ip> [-c <count>]
-  acktier key create --server <url> --admin-token <token> [--reusable] [--label <name>]
-  acktier route approve --server <url> --admin-token <token> --node <id> --routes <cidr,...>
-  acktier acl set --server <url> --admin-token <token> --file <policy.json>`)
+  acktier key create --server <https-url> --admin-token <token> [--tls-ca <ca.pem>] [--reusable] [--label <name>]
+  acktier route approve --server <https-url> --admin-token <token> [--tls-ca <ca.pem>] --node <id> --routes <cidr,...>
+  acktier acl set --server <https-url> --admin-token <token> [--tls-ca <ca.pem>] --file <policy.json>`)
 }
 
 func runUp(apiBase string, args []string) {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	apiFlag := fs.String("api", apiBase, "LocalAPI base URL")
-	serverURL := fs.String("server", "", "AckTier Control Server URL")
-	authKey := fs.String("auth-key", "", "PreAuthKey for registration")
-	hostname := fs.String("hostname", "", "Custom node hostname")
+	serverURL := fs.String("server", "", "AckTier Control Server URL (https:// required for non-loopback)")
+	authKey := fs.String("auth-key", "", "PreAuthKey for new node registration")
+	hostname := fs.String("hostname", "", "Desired node hostname")
 	routesCSV := fs.String("advertise-routes", "", "Comma-separated subnet CIDRs to advertise")
 	advExit := fs.Bool("advertise-exit-node", false, "Offer this node as a global Exit Node (0.0.0.0/0, ::/0)")
 	exitNode := fs.String("exit-node", "", "Select peer name or IP as global Exit Node (or 'none')")
 	relayMode := fs.String("relay-mode", "auto", "Peer relay mode: auto (public IP auto-enables) | on | off")
 	maxRelayMbps := fs.Float64("relay-max-mbps", 0, "Optional transit relay bandwidth limit in Mbps")
 	canRelay := fs.Bool("can-relay", false, "Force enable peer relay (alias for --relay-mode=on)")
+	insecureHTTP := fs.Bool("insecure-http", false, "Allow plaintext HTTP/Relay to non-loopback server (lab testing only)")
 	_ = fs.Parse(args)
 
 	var routes []netip.Prefix
@@ -105,14 +106,15 @@ func runUp(apiBase string, args []string) {
 
 	dc := client.NewDaemonClient(*apiFlag, nil)
 	nm, err := dc.Up(context.Background(), client.UpOptions{
-		ServerURL:        *serverURL,
-		AuthKey:          *authKey,
-		Hostname:         *hostname,
-		AdvertisedRoutes: routes,
-		ExitNode:         *exitNode,
-		RelayMode:        types.RelayMode(*relayMode),
-		MaxRelayMbps:     *maxRelayMbps,
-		CanRelay:         *canRelay,
+		ServerURL:         *serverURL,
+		AuthKey:           *authKey,
+		Hostname:          *hostname,
+		AdvertisedRoutes:  routes,
+		ExitNode:          *exitNode,
+		RelayMode:         types.RelayMode(*relayMode),
+		MaxRelayMbps:      *maxRelayMbps,
+		CanRelay:          *canRelay,
+		AllowInsecureHTTP: *insecureHTTP,
 	})
 	if err != nil {
 		fatalf("%v", err)
@@ -126,7 +128,7 @@ func runDown(apiBase string) {
 	if err := dc.Down(context.Background()); err != nil {
 		fatalf("%v", err)
 	}
-	fmt.Println("AckTier network disconnected.")
+	fmt.Println("AckTier network disconnected (all sessions and flows cleared).")
 }
 
 func runStatus(apiBase string, args []string) {
@@ -296,18 +298,28 @@ func runExitNode(apiBase string, args []string) {
 	fmt.Printf("Active Exit Node updated to: %s\n", args[0])
 }
 
+func buildAdminClient(serverURL, token, tlsCA string, insecureHTTP bool) *client.AdminClient {
+	ac := client.NewAdminClient(serverURL, token, nil)
+	if err := ac.ConfigureTLS(tlsCA, insecureHTTP); err != nil {
+		fatalf("%v", err)
+	}
+	return ac
+}
+
 func runAdminKey(args []string) {
 	if len(args) == 0 || args[0] != "create" {
-		fatalf("usage: acktier key create --server <url> --admin-token <token> [--reusable] [--label <name>]")
+		fatalf("usage: acktier key create --server <url> --admin-token <token> [--tls-ca <ca.pem>] [--reusable] [--label <name>]")
 	}
 	fs := flag.NewFlagSet("key create", flag.ExitOnError)
 	serverURL := fs.String("server", "http://127.0.0.1:8080", "Control Server URL")
 	token := fs.String("admin-token", os.Getenv("ACKTIER_ADMIN_TOKEN"), "Admin Bearer Token")
+	tlsCA := fs.String("tls-ca", os.Getenv("ACKTIER_TLS_CA"), "Optional Root CA PEM file")
+	insecureHTTP := fs.Bool("insecure-http", false, "Allow plaintext HTTP on non-loopback server (lab testing only)")
 	reusable := fs.Bool("reusable", true, "Allow multiple nodes to use this key")
 	label := fs.String("label", "cli-key", "Key label")
 	_ = fs.Parse(args[1:])
 
-	ac := client.NewAdminClient(*serverURL, *token, nil)
+	ac := buildAdminClient(*serverURL, *token, *tlsCA, *insecureHTTP)
 	pak, err := ac.CreatePreAuthKey(context.Background(), client.CreateKeyOptions{
 		Label:    *label,
 		Reusable: *reusable,
@@ -321,11 +333,13 @@ func runAdminKey(args []string) {
 
 func runAdminRoute(args []string) {
 	if len(args) == 0 || args[0] != "approve" {
-		fatalf("usage: acktier route approve --server <url> --admin-token <token> --node <id> --routes <cidr,...>")
+		fatalf("usage: acktier route approve --server <url> --admin-token <token> [--tls-ca <ca.pem>] --node <id> --routes <cidr,...>")
 	}
 	fs := flag.NewFlagSet("route approve", flag.ExitOnError)
 	serverURL := fs.String("server", "http://127.0.0.1:8080", "Control Server URL")
 	token := fs.String("admin-token", os.Getenv("ACKTIER_ADMIN_TOKEN"), "Admin Bearer Token")
+	tlsCA := fs.String("tls-ca", os.Getenv("ACKTIER_TLS_CA"), "Optional Root CA PEM file")
+	insecureHTTP := fs.Bool("insecure-http", false, "Allow plaintext HTTP on non-loopback server (lab testing only)")
 	nodeID := fs.Uint64("node", 0, "Target Node ID")
 	routesCSV := fs.String("routes", "", "Comma-separated CIDRs to approve")
 	_ = fs.Parse(args[1:])
@@ -342,7 +356,7 @@ func runAdminRoute(args []string) {
 			pfxs = append(pfxs, pfx)
 		}
 	}
-	ac := client.NewAdminClient(*serverURL, *token, nil)
+	ac := buildAdminClient(*serverURL, *token, *tlsCA, *insecureHTTP)
 	if _, err := ac.ApproveRoutes(context.Background(), types.NodeID(*nodeID), pfxs); err != nil {
 		fatalf("%v", err)
 	}
@@ -351,11 +365,13 @@ func runAdminRoute(args []string) {
 
 func runAdminACL(args []string) {
 	if len(args) == 0 || args[0] != "set" {
-		fatalf("usage: acktier acl set --server <url> --admin-token <token> --file <policy.json>")
+		fatalf("usage: acktier acl set --server <url> --admin-token <token> [--tls-ca <ca.pem>] --file <policy.json>")
 	}
 	fs := flag.NewFlagSet("acl set", flag.ExitOnError)
 	serverURL := fs.String("server", "http://127.0.0.1:8080", "Control Server URL")
 	token := fs.String("admin-token", os.Getenv("ACKTIER_ADMIN_TOKEN"), "Admin Bearer Token")
+	tlsCA := fs.String("tls-ca", os.Getenv("ACKTIER_TLS_CA"), "Optional Root CA PEM file")
+	insecureHTTP := fs.Bool("insecure-http", false, "Allow plaintext HTTP on non-loopback server (lab testing only)")
 	filePath := fs.String("file", "", "Path to ACL policy JSON file")
 	_ = fs.Parse(args[1:])
 	raw, err := os.ReadFile(*filePath)
@@ -366,7 +382,7 @@ func runAdminACL(args []string) {
 	if err := json.Unmarshal(raw, &pol); err != nil {
 		fatalf("parse policy json: %v", err)
 	}
-	ac := client.NewAdminClient(*serverURL, *token, nil)
+	ac := buildAdminClient(*serverURL, *token, *tlsCA, *insecureHTTP)
 	if _, err := ac.SetACL(context.Background(), pol); err != nil {
 		fatalf("%v", err)
 	}

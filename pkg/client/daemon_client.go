@@ -19,13 +19,15 @@ import (
 const DefaultLocalAPIURL = "http://" + localapi.DefaultAddr
 
 // DaemonClient is a typed Go SDK client for controlling an out-of-process `acktierd` daemon
-// (ideal for Desktop GUIs, tray apps, CLI tools, and local automation).
+// authenticated via an OS-permission-protected LocalAPI token.
 type DaemonClient struct {
 	baseURL    string
+	token      string
 	httpClient *http.Client
 }
 
-// NewDaemonClient creates a client targeting an acktierd LocalAPI endpoint (defaults to http://127.0.0.1:41920).
+// NewDaemonClient creates a client targeting an acktierd LocalAPI endpoint (defaults to http://127.0.0.1:41920),
+// automatically loading the owner-only LocalAPI token from ACKTIER_LOCAL_TOKEN or the OS-protected token file.
 func NewDaemonClient(apiURL string, httpCli *http.Client) *DaemonClient {
 	if strings.TrimSpace(apiURL) == "" {
 		apiURL = DefaultLocalAPIURL
@@ -33,10 +35,17 @@ func NewDaemonClient(apiURL string, httpCli *http.Client) *DaemonClient {
 	if httpCli == nil {
 		httpCli = &http.Client{Timeout: 15 * time.Second}
 	}
+	cleanURL := strings.TrimRight(apiURL, "/")
 	return &DaemonClient{
-		baseURL:    strings.TrimRight(apiURL, "/"),
+		baseURL:    cleanURL,
+		token:      localapi.ReadTokenFile(cleanURL),
 		httpClient: httpCli,
 	}
+}
+
+// SetToken explicitly configures the LocalAPI bearer token (useful for in-process Node.LocalAPIHandler() SDK usage).
+func (c *DaemonClient) SetToken(token string) {
+	c.token = strings.TrimSpace(token)
 }
 
 func (c *DaemonClient) Up(ctx context.Context, opts UpOptions) (*types.NetMap, error) {
@@ -129,6 +138,13 @@ func (c *DaemonClient) doJSON(ctx context.Context, method, path string, reqBody 
 	if reqBody != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	tok := c.token
+	if tok == "" {
+		tok = localapi.ReadTokenFile(c.baseURL)
+	}
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -136,11 +152,11 @@ func (c *DaemonClient) doJSON(ctx context.Context, method, path string, reqBody 
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg, _ := io.ReadAll(resp.Body)
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		return fmt.Errorf("localapi %s %s failed (HTTP %d): %s", method, path, resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
 	if respOut != nil {
-		return json.NewDecoder(resp.Body).Decode(respOut)
+		return json.NewDecoder(io.LimitReader(resp.Body, 4*1024*1024)).Decode(respOut)
 	}
 	return nil
 }

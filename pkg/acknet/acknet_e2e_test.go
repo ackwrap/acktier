@@ -332,10 +332,11 @@ func TestSDK_AckNetHTTP_UDP_SOCKS5_And_EmbeddedClientInterop(t *testing.T) {
 	}
 	defer gwNode.Close()
 
-	// Control gwNode via `client.DaemonClient` over its LocalAPIHandler!
+	// Control gwNode via `client.DaemonClient` over its authenticated LocalAPIHandler!
 	daemonCLI := client.NewDaemonClient("http://local.daemon", &http.Client{
 		Transport: &memHTTP{h: gwNode.LocalAPIHandler()},
 	})
+	daemonCLI.SetToken(gwNode.LocalAPIToken())
 	subnetPfx := netip.MustParsePrefix("192.168.88.0/24")
 	nmGW, err := daemonCLI.Up(ctx, client.UpOptions{
 		ServerURL:        "http://acktier.sdk",

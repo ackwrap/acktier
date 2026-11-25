@@ -2,36 +2,151 @@ package localapi
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/acktier/acktier/internal/daemon/engine"
+	"github.com/acktier/acktier/internal/secfile"
 )
 
-const DefaultAddr = "127.0.0.1:41920"
+const (
+	DefaultAddr     = "127.0.0.1:41920"
+	maxLocalAPIBody = 64 * 1024
+)
 
-// Server exposes local daemon management endpoints to the `acktier` CLI and desktop GUI.
-type Server struct {
-	eng *engine.Engine
+func generateFallbackToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return "lapi_" + hex.EncodeToString(b)
 }
 
-func NewServer(eng *engine.Engine) *Server {
-	return &Server{eng: eng}
+// TokenFilePathForAddr computes the deterministic owner-only LocalAPI token file path for a given listen addr or URL.
+func TokenFilePathForAddr(addrOrURL string) string {
+	raw := strings.TrimSpace(addrOrURL)
+	if raw == "" {
+		raw = DefaultAddr
+	}
+	if strings.Contains(raw, "://") {
+		if u, err := url.Parse(raw); err == nil && u.Host != "" {
+			raw = u.Host
+		}
+	}
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		port = "41920"
+		host = "127.0.0.1"
+	}
+	if host == "" || strings.EqualFold(host, "localhost") {
+		host = "127.0.0.1"
+	}
+	safeHost := strings.NewReplacer(":", "_", ".", "_", "[", "", "]", "").Replace(host)
+	baseDir, err := os.UserConfigDir()
+	if err != nil || baseDir == "" {
+		baseDir = os.TempDir()
+	}
+	return filepath.Join(baseDir, "acktier", fmt.Sprintf("localapi-%s-%s.token", safeHost, port))
+}
+
+// WriteTokenFile persists the LocalAPI bearer token with strict owner-only OS permissions (0600 / Protected Windows DACL).
+func WriteTokenFile(listenAddr, token string) (string, error) {
+	p := TokenFilePathForAddr(listenAddr)
+	if err := secfile.WritePrivate(p, []byte(strings.TrimSpace(token)+"\n")); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// ReadTokenFile loads the LocalAPI bearer token for targetAddrOrURL if accessible to the current OS user.
+func ReadTokenFile(targetAddrOrURL string) string {
+	if envTok := strings.TrimSpace(os.Getenv("ACKTIER_LOCAL_TOKEN")); envTok != "" {
+		return envTok
+	}
+	p := TokenFilePathForAddr(targetAddrOrURL)
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// Server exposes authenticated local daemon management endpoints to the `acktier` CLI and desktop GUI.
+type Server struct {
+	eng   *engine.Engine
+	token string
+}
+
+func NewServer(eng *engine.Engine, authToken string) *Server {
+	tok := strings.TrimSpace(authToken)
+	if tok == "" {
+		tok = eng.LocalAPIToken()
+	}
+	if tok == "" {
+		tok = generateFallbackToken()
+	}
+	return &Server{
+		eng:   eng,
+		token: tok,
+	}
+}
+
+func (s *Server) Token() string {
+	return s.token
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /local/v1/status", s.handleStatus)
-	mux.HandleFunc("GET /local/v1/mesh", s.handleMesh)
-	mux.HandleFunc("GET /local/v1/netcheck", s.handleNetCheck)
-	mux.HandleFunc("GET /local/v1/dns", s.handleDNSLookup)
-	mux.HandleFunc("POST /local/v1/exit-node", s.handleSetExitNode)
-	mux.HandleFunc("POST /local/v1/network-change", s.handleNetworkChange)
-	mux.HandleFunc("POST /local/v1/up", s.handleUp)
-	mux.HandleFunc("POST /local/v1/down", s.handleDown)
-	mux.HandleFunc("POST /local/v1/ping", s.handlePing)
+	mux.HandleFunc("GET /local/v1/status", s.requireLocalAuth(s.handleStatus))
+	mux.HandleFunc("GET /local/v1/mesh", s.requireLocalAuth(s.handleMesh))
+	mux.HandleFunc("GET /local/v1/netcheck", s.requireLocalAuth(s.handleNetCheck))
+	mux.HandleFunc("GET /local/v1/dns", s.requireLocalAuth(s.handleDNSLookup))
+	mux.HandleFunc("POST /local/v1/exit-node", s.requireLocalAuth(s.handleSetExitNode))
+	mux.HandleFunc("POST /local/v1/network-change", s.requireLocalAuth(s.handleNetworkChange))
+	mux.HandleFunc("POST /local/v1/up", s.requireLocalAuth(s.handleUp))
+	mux.HandleFunc("POST /local/v1/down", s.requireLocalAuth(s.handleDown))
+	mux.HandleFunc("POST /local/v1/ping", s.requireLocalAuth(s.handlePing))
 	return mux
+}
+
+func (s *Server) requireLocalAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Block browser cross-origin / CSRF / DNS-rebinding requests unconditionally.
+		if r.Header.Get("Origin") != "" {
+			writeError(w, http.StatusForbidden, "cross-origin browser requests are forbidden on LocalAPI")
+			return
+		}
+		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && !strings.EqualFold(sfs, "none") {
+			writeError(w, http.StatusForbidden, "browser fetch requests are forbidden on LocalAPI")
+			return
+		}
+
+		provided := strings.TrimSpace(r.Header.Get("X-AckTier-Local-Token"))
+		if provided == "" {
+			hdr := r.Header.Get("Authorization")
+			if len(hdr) >= 7 && strings.EqualFold(hdr[:7], "Bearer ") {
+				provided = strings.TrimSpace(hdr[7:])
+			}
+		}
+		if provided == "" || len(provided) != len(s.token) || subtle.ConstantTimeCompare([]byte(provided), []byte(s.token)) != 1 {
+			writeError(w, http.StatusUnauthorized, "missing or invalid LocalAPI bearer token")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func decodeLocalJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxLocalAPIBody)
+	return json.NewDecoder(r.Body).Decode(dst)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -60,7 +175,7 @@ func (s *Server) handleSetExitNode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ExitNode string `json:"exitNode"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeLocalJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -84,7 +199,7 @@ func (s *Server) handleNetCheck(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUp(w http.ResponseWriter, r *http.Request) {
 	var req engine.UpRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeLocalJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
@@ -108,7 +223,7 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		Target    string `json:"target"`
 		TimeoutMs int    `json:"timeoutMs"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Target == "" {
+	if err := decodeLocalJSON(w, r, &req); err != nil || req.Target == "" {
 		writeError(w, http.StatusBadRequest, "target is required")
 		return
 	}

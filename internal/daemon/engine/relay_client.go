@@ -3,9 +3,14 @@ package engine
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,7 +23,15 @@ import (
 // DialFunc dials a stream connection (allows injecting in-memory pipes in tests).
 type DialFunc func(ctx context.Context, network, address string) (net.Conn, error)
 
-// RelayClient maintains a persistent upgraded TCP stream to an acktier-server `/relay` endpoint
+// RelayTLSConfig controls certificate-verified TLS wrapping on the Center Relay stream.
+type RelayTLSConfig struct {
+	UseTLS            bool
+	ServerName        string
+	RootCAs           *x509.CertPool
+	EnforceNonLoopTLS bool // Reject plaintext TCP to non-loopback RelayAddr when UseTLS is false
+}
+
+// RelayClient maintains a persistent upgraded TLS/TCP stream to an acktier-server `/relay` endpoint
 // and continuously measures server relay RTT for global path cost comparison.
 type RelayClient struct {
 	dial      DialFunc
@@ -26,13 +39,14 @@ type RelayClient struct {
 	nodeToken string
 	onRecv    func(src types.PublicKey, inner []byte)
 
-	mu        sync.RWMutex
-	writeMu   sync.Mutex
-	relayAddr string
-	conn      net.Conn
-	connected atomic.Bool
-	rttMicros atomic.Int64
-	probeSeq  atomic.Uint64
+	mu            sync.RWMutex
+	writeMu       sync.Mutex
+	relayAddr     string
+	tlsOpts       RelayTLSConfig
+	conn          net.Conn
+	connected     atomic.Bool
+	rttMicros     atomic.Int64
+	lastPingID    atomic.Uint64
 }
 
 func NewRelayClient(dial DialFunc, nodeKey types.PublicKey, onRecv func(src types.PublicKey, inner []byte)) *RelayClient {
@@ -60,29 +74,44 @@ func (rc *RelayClient) RTTMillis() float64 {
 	return float64(us) / 1000.0
 }
 
-func (rc *RelayClient) Run(ctx context.Context, relayAddr, nodeToken string) {
+func isLoopbackHostPort(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
+}
+
+func (rc *RelayClient) Run(ctx context.Context, relayAddr, nodeToken string, tlsOpts RelayTLSConfig) {
 	rc.mu.Lock()
 	rc.relayAddr = relayAddr
 	rc.nodeToken = nodeToken
+	rc.tlsOpts = tlsOpts
 	rc.mu.Unlock()
 
 	backoff := 200 * time.Millisecond
 	for {
 		select {
 		case <-ctx.Done():
-			rc.closeCurrent()
+			rc.CloseCurrent()
 			return
 		default:
 		}
 
-		err := rc.connectAndServe(ctx, relayAddr, nodeToken)
+		err := rc.connectAndServe(ctx, relayAddr, nodeToken, tlsOpts)
 		rc.connected.Store(false)
 		if ctx.Err() != nil {
+			rc.CloseCurrent()
 			return
 		}
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				rc.CloseCurrent()
 				return
 			case <-time.After(backoff):
 			}
@@ -95,13 +124,43 @@ func (rc *RelayClient) Run(ctx context.Context, relayAddr, nodeToken string) {
 	}
 }
 
-func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string) error {
+func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string, tlsOpts RelayTLSConfig) error {
+	if !tlsOpts.UseTLS && tlsOpts.EnforceNonLoopTLS && !isLoopbackHostPort(addr) {
+		return fmt.Errorf("refusing to transmit relay token in cleartext to non-loopback %s; enable HTTPS/TLS on acktier-server", addr)
+	}
+
 	dialCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	conn, err := rc.dial(dialCtx, "tcp", addr)
-	cancel()
+	rawConn, err := rc.dial(dialCtx, "tcp", addr)
 	if err != nil {
+		cancel()
 		return err
 	}
+
+	conn := rawConn
+	if tlsOpts.UseTLS {
+		sni := strings.TrimSpace(tlsOpts.ServerName)
+		if sni == "" {
+			if h, _, sErr := net.SplitHostPort(addr); sErr == nil && h != "" {
+				sni = h
+			} else {
+				sni = addr
+			}
+		}
+		tCfg := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: sni,
+			RootCAs:    tlsOpts.RootCAs,
+		}
+		tlsConn := tls.Client(rawConn, tCfg)
+		if err := tlsConn.HandshakeContext(dialCtx); err != nil {
+			cancel()
+			_ = rawConn.Close()
+			return fmt.Errorf("relay TLS certificate verification failed: %w", err)
+		}
+		conn = tlsConn
+	}
+	cancel()
+
 	defer func() {
 		rc.connected.Store(false)
 		_ = conn.Close()
@@ -181,17 +240,19 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string) 
 		}
 		switch pType {
 		case protocol.PacketPong:
-			_, sender, _, txNano, _, err := protocol.DecodeProbePacket(frame)
-			if err == nil && sender == rc.nodeKey {
+			_, sender, probeID, txNano, _, err := protocol.DecodeProbePacket(frame)
+			if err == nil && sender == rc.nodeKey && probeID != 0 && rc.lastPingID.CompareAndSwap(probeID, 0) {
 				sampleUs := time.Since(time.Unix(0, txNano)).Microseconds()
-				if sampleUs < 50 {
-					sampleUs = 50
-				}
-				prev := rc.rttMicros.Load()
-				if prev <= 0 {
-					rc.rttMicros.Store(sampleUs)
-				} else {
-					rc.rttMicros.Store((prev*3 + sampleUs) / 4)
+				if sampleUs >= 0 && sampleUs < 10_000_000 {
+					if sampleUs < 50 {
+						sampleUs = 50
+					}
+					prev := rc.rttMicros.Load()
+					if prev <= 0 {
+						rc.rttMicros.Store(sampleUs)
+					} else {
+						rc.rttMicros.Store((prev*3 + sampleUs) / 4)
+					}
 				}
 			}
 		case protocol.PacketRelayForward:
@@ -203,7 +264,7 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string) 
 	}
 }
 
-// SendServerPing transmits a lightweight probe frame to measure RTT to the Center Relay server.
+// SendServerPing transmits a CSPRNG-tagged probe frame to measure RTT to the Center Relay server.
 func (rc *RelayClient) SendServerPing() {
 	rc.mu.RLock()
 	conn := rc.conn
@@ -211,7 +272,14 @@ func (rc *RelayClient) SendServerPing() {
 	if conn == nil || !rc.connected.Load() {
 		return
 	}
-	ping := protocol.EncodeProbePacket(protocol.PacketPing, rc.nodeKey, rc.probeSeq.Add(1), time.Now().UnixNano(), "")
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	pid := binary.LittleEndian.Uint64(b[:])
+	if pid == 0 {
+		pid = 1
+	}
+	rc.lastPingID.Store(pid)
+	ping := protocol.EncodeProbePacket(protocol.PacketPing, rc.nodeKey, pid, time.Now().UnixNano(), "")
 	rc.writeMu.Lock()
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = protocol.WriteFrame(conn, ping)
@@ -233,7 +301,7 @@ func (rc *RelayClient) Send(dst types.PublicKey, inner []byte) error {
 	return err
 }
 
-func (rc *RelayClient) closeCurrent() {
+func (rc *RelayClient) CloseCurrent() {
 	rc.mu.Lock()
 	if rc.conn != nil {
 		_ = rc.conn.Close()

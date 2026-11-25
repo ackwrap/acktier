@@ -170,6 +170,16 @@ func (d *WSSDriver) removeConn(addr string, wc *wsPeerConn) {
 	d.mu.Unlock()
 }
 
+// ResetConnections terminates all active WebSocket peer connections while keeping the TLS listener bound.
+func (d *WSSDriver) ResetConnections() {
+	d.mu.Lock()
+	for k, wc := range d.conns {
+		_ = wc.conn.CloseNow()
+		delete(d.conns, k)
+	}
+	d.mu.Unlock()
+}
+
 func (d *WSSDriver) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.closed)

@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -10,12 +11,19 @@ import (
 	"github.com/acktier/acktier/pkg/types"
 )
 
+const (
+	tcpFirstFrameTimeout = 5 * time.Second
+	tcpIdleReadTimeout   = 90 * time.Second
+	maxTCPPeerConns      = 512
+)
+
 // StreamDialFunc dials a stream connection (TCP or in-memory test pipe).
 type StreamDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
 type tcpPeerConn struct {
 	addr    string
 	conn    net.Conn
+	inbound bool
 	writeMu sync.Mutex
 }
 
@@ -84,7 +92,11 @@ func (d *TCPDriver) Send(ctx context.Context, addr string, pkt []byte) error {
 		return err
 	}
 
-	tc := d.registerConn(addr, conn)
+	tc, ok := d.registerConn(addr, conn, false)
+	if !ok {
+		_ = conn.Close()
+		return errors.New("tcp connection pool at capacity")
+	}
 	if err := tc.send(pkt); err != nil {
 		d.removeConn(addr, tc)
 		return err
@@ -103,30 +115,44 @@ func (d *TCPDriver) acceptLoop() {
 				continue
 			}
 		}
-		d.registerConn(conn.RemoteAddr().String(), conn)
+		if _, ok := d.registerConn(conn.RemoteAddr().String(), conn, true); !ok {
+			_ = conn.Close()
+		}
 	}
 }
 
-func (d *TCPDriver) registerConn(addr string, conn net.Conn) *tcpPeerConn {
-	tc := &tcpPeerConn{addr: addr, conn: conn}
+func (d *TCPDriver) registerConn(addr string, conn net.Conn, inbound bool) (*tcpPeerConn, bool) {
+	tc := &tcpPeerConn{addr: addr, conn: conn, inbound: inbound}
 	d.mu.Lock()
 	if old, ok := d.conns[addr]; ok {
 		_ = old.conn.Close()
+	} else if len(d.conns) >= maxTCPPeerConns {
+		d.mu.Unlock()
+		return nil, false
 	}
 	d.conns[addr] = tc
 	d.mu.Unlock()
 
 	go d.readConnLoop(tc)
-	return tc
+	return tc, true
 }
 
 func (d *TCPDriver) readConnLoop(tc *tcpPeerConn) {
 	defer d.removeConn(tc.addr, tc)
+
+	first := true
 	for {
+		if tc.inbound && first {
+			// Strict initial-frame deadline blocks slowloris / empty-connection exhaustion attacks!
+			_ = tc.conn.SetReadDeadline(time.Now().Add(tcpFirstFrameTimeout))
+		} else {
+			_ = tc.conn.SetReadDeadline(time.Now().Add(tcpIdleReadTimeout))
+		}
 		frame, err := protocol.ReadFrame(tc.conn)
 		if err != nil {
 			return
 		}
+		first = false
 		if d.onRecv != nil {
 			d.onRecv(frame, types.Endpoint{
 				Proto: types.ProtoTCP,
@@ -145,18 +171,23 @@ func (d *TCPDriver) removeConn(addr string, tc *tcpPeerConn) {
 	d.mu.Unlock()
 }
 
+// ResetConnections terminates all active pooled TCP peer streams while keeping the listener open.
+func (d *TCPDriver) ResetConnections() {
+	d.mu.Lock()
+	for k, tc := range d.conns {
+		_ = tc.conn.Close()
+		delete(d.conns, k)
+	}
+	d.mu.Unlock()
+}
+
 func (d *TCPDriver) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.closed)
 		if d.ln != nil {
 			_ = d.ln.Close()
 		}
-		d.mu.Lock()
-		for k, tc := range d.conns {
-			_ = tc.conn.Close()
-			delete(d.conns, k)
-		}
-		d.mu.Unlock()
+		d.ResetConnections()
 	})
 	return nil
 }

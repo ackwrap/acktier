@@ -10,11 +10,15 @@ import (
 )
 
 const (
-	MagicByte     byte = 0xAC
-	ProtoVersion  byte = 0x01
-	HeaderMinSize      = 4 // Magic(1) + Version(1) + PacketType(1) + Flags(1)
-	MaxFrameSize       = 65535
-	DefaultHopTTL byte = 8
+	MagicByte          byte = 0xAC
+	ProtoVersion       byte = 0x01
+	HeaderMinSize           = 4 // Magic(1) + Version(1) + PacketType(1) + Flags(1)
+	MaxFrameSize            = 65535
+	DefaultHopTTL      byte = 8
+	ControlAuthTagSize      = 16
+
+	FlagPunchReply  byte = 0x01
+	FlagControlAuth byte = 0x02
 )
 
 // PacketType identifies the wire message kind across direct and relayed transports.
@@ -38,6 +42,7 @@ var (
 	ErrBadMagic      = errors.New("protocol: invalid magic byte")
 	ErrBadVersion    = errors.New("protocol: unsupported protocol version")
 	ErrFrameTooLarge = errors.New("protocol: frame exceeds max size")
+	ErrControlUnauth = errors.New("protocol: control packet missing or invalid authentication tag")
 )
 
 // ParseHeader validates the 4-byte common wire header and returns PacketType, Flags, and body slice.
@@ -116,8 +121,8 @@ func DecodeHandshakePacket(pkt []byte) (pktType PacketType, staticPub, ephPub ty
 	return pType, staticPub, ephPub, tsNano, body[72:], nil
 }
 
-// ProbePacket is used for Ping/Pong RTT measurement and observed endpoint discovery (STUN-like).
-// Wire layout: Header(4) + SenderPub(32) + ProbeID(8) + TxUnixNano(8) + ObservedAddrLen(1) + ObservedAddr(...)
+// ProbePacket is used for STUN/Relay RTT measurement (unauthenticated) and Peer Ping/Pong (HMAC-authenticated).
+// Wire layout: Header(4) + SenderPub(32) + ProbeID(8) + TxUnixNano(8) + ObservedAddrLen(1) + ObservedAddr(...) [+ AuthTag(16)]
 func EncodeProbePacket(pktType PacketType, sender types.PublicKey, probeID uint64, txNano int64, observedAddr string) []byte {
 	if len(observedAddr) > 255 {
 		observedAddr = observedAddr[:255]
@@ -132,10 +137,39 @@ func EncodeProbePacket(pktType PacketType, sender types.PublicKey, probeID uint6
 	return out
 }
 
+// EncodeAuthProbePacket encodes a peer-to-peer Ping/Pong packet authenticated with a 128-bit per-peer HMAC bound to targetPub.
+func EncodeAuthProbePacket(pktType PacketType, sender, targetPub types.PublicKey, probeID uint64, txNano int64, observedAddr string, sign func(data []byte) ([ControlAuthTagSize]byte, error)) ([]byte, error) {
+	if len(observedAddr) > 255 {
+		observedAddr = observedAddr[:255]
+	}
+	baseLen := HeaderMinSize + 32 + 8 + 8 + 1 + len(observedAddr)
+	out := make([]byte, baseLen+ControlAuthTagSize)
+	WriteHeader(out, pktType, FlagControlAuth)
+	copy(out[4:36], sender[:])
+	binary.BigEndian.PutUint64(out[36:44], probeID)
+	binary.BigEndian.PutUint64(out[44:52], uint64(txNano))
+	out[52] = byte(len(observedAddr))
+	copy(out[53:baseLen], observedAddr)
+
+	macInput := buildControlAuthInput(targetPub, out[:baseLen])
+	tag, err := sign(macInput)
+	if err != nil {
+		return nil, err
+	}
+	copy(out[baseLen:], tag[:])
+	return out, nil
+}
+
 func DecodeProbePacket(pkt []byte) (pktType PacketType, sender types.PublicKey, probeID uint64, txNano int64, observedAddr string, err error) {
-	pType, _, body, err := ParseHeader(pkt)
+	pType, flags, body, err := ParseHeader(pkt)
 	if err != nil {
 		return 0, sender, 0, 0, "", err
+	}
+	if flags&FlagControlAuth != 0 {
+		if len(body) < 49+ControlAuthTagSize {
+			return 0, sender, 0, 0, "", ErrShortPacket
+		}
+		body = body[:len(body)-ControlAuthTagSize]
 	}
 	if (pType != PacketPing && pType != PacketPong) || len(body) < 49 {
 		return 0, sender, 0, 0, "", ErrShortPacket
@@ -144,34 +178,72 @@ func DecodeProbePacket(pkt []byte) (pktType PacketType, sender types.PublicKey, 
 	probeID = binary.BigEndian.Uint64(body[32:40])
 	txNano = int64(binary.BigEndian.Uint64(body[40:48]))
 	addrLen := int(body[48])
-	if len(body) < 49+addrLen {
+	if len(body) != 49+addrLen {
 		return 0, sender, 0, 0, "", ErrShortPacket
 	}
 	observedAddr = string(body[49 : 49+addrLen])
 	return pType, sender, probeID, txNano, observedAddr, nil
 }
 
-// EncodePunchCoord encodes a CallMeMaybe hole-punch coordination message carrying fresh STUN endpoints & NAT hints.
-// Wire layout: Header(4, flags=isReply) + SenderPub(32) + NATKind(1) + PortStep(2) + EpCount(1) + [ProtoLen(1)+Proto + AddrLen(1)+Addr]...
-func EncodePunchCoord(sender types.PublicKey, isReply bool, natKind byte, portStep int16, endpoints []types.Endpoint) []byte {
+// DecodeAndVerifyProbePacket decodes a ProbePacket and, if FlagControlAuth is set, verifies its HMAC bound to localPub.
+func DecodeAndVerifyProbePacket(pkt []byte, localPub types.PublicKey, verify func(sender types.PublicKey, data []byte, tag [ControlAuthTagSize]byte) bool) (pktType PacketType, sender types.PublicKey, probeID uint64, txNano int64, observedAddr string, authenticated bool, err error) {
+	pType, flags, _, err := ParseHeader(pkt)
+	if err != nil {
+		return 0, sender, 0, 0, "", false, err
+	}
+	if pType != PacketPing && pType != PacketPong {
+		return 0, sender, 0, 0, "", false, ErrShortPacket
+	}
+	if flags&FlagControlAuth == 0 {
+		pType, sender, probeID, txNano, observedAddr, err = DecodeProbePacket(pkt)
+		return pType, sender, probeID, txNano, observedAddr, false, err
+	}
+	if len(pkt) < HeaderMinSize+49+ControlAuthTagSize {
+		return 0, sender, 0, 0, "", false, ErrShortPacket
+	}
+	baseLen := len(pkt) - ControlAuthTagSize
+	pType, sender, probeID, txNano, observedAddr, err = DecodeProbePacket(pkt)
+	if err != nil {
+		return 0, sender, 0, 0, "", false, err
+	}
+	var tag [ControlAuthTagSize]byte
+	copy(tag[:], pkt[baseLen:])
+	if verify == nil || !verify(sender, buildControlAuthInput(localPub, pkt[:baseLen]), tag) {
+		return 0, sender, 0, 0, "", false, ErrControlUnauth
+	}
+	return pType, sender, probeID, txNano, observedAddr, true, nil
+}
+
+// EncodeAuthPunchCoord encodes an HMAC-authenticated CallMeMaybe hole-punch coordination packet with replay timestamp.
+// Wire layout: Header(4, flags) + SenderPub(32) + TxUnixNano(8) + NATKind(1) + PortStep(2) + EpCount(1) + Endpoints... + AuthTag(16)
+func EncodeAuthPunchCoord(sender, targetPub types.PublicKey, isReply bool, natKind byte, portStep int16, txNano int64, endpoints []types.Endpoint, sign func(data []byte) ([ControlAuthTagSize]byte, error)) ([]byte, error) {
 	if len(endpoints) > 16 {
 		endpoints = endpoints[:16]
 	}
-	size := HeaderMinSize + 32 + 1 + 2 + 1
+	size := HeaderMinSize + 32 + 8 + 1 + 2 + 1
 	for _, ep := range endpoints {
-		size += 1 + len(ep.Proto) + 1 + len(ep.Addr)
+		pLen := len(ep.Proto)
+		if pLen > 16 {
+			pLen = 16
+		}
+		aLen := len(ep.Addr)
+		if aLen > 128 {
+			aLen = 128
+		}
+		size += 1 + pLen + 1 + aLen
 	}
-	flags := byte(0)
+	flags := FlagControlAuth
 	if isReply {
-		flags = 1
+		flags |= FlagPunchReply
 	}
-	out := make([]byte, size)
+	out := make([]byte, size+ControlAuthTagSize)
 	WriteHeader(out, PacketPunchCoord, flags)
 	copy(out[4:36], sender[:])
-	out[36] = natKind
-	binary.BigEndian.PutUint16(out[37:39], uint16(portStep))
-	out[39] = byte(len(endpoints))
-	off := 40
+	binary.BigEndian.PutUint64(out[36:44], uint64(txNano))
+	out[44] = natKind
+	binary.BigEndian.PutUint16(out[45:47], uint16(portStep))
+	out[47] = byte(len(endpoints))
+	off := 48
 	for _, ep := range endpoints {
 		pStr := string(ep.Proto)
 		if len(pStr) > 16 {
@@ -190,44 +262,78 @@ func EncodePunchCoord(sender types.PublicKey, isReply bool, natKind byte, portSt
 		copy(out[off:], aStr)
 		off += len(aStr)
 	}
-	return out[:off]
+	macInput := buildControlAuthInput(targetPub, out[:off])
+	tag, err := sign(macInput)
+	if err != nil {
+		return nil, err
+	}
+	copy(out[off:off+ControlAuthTagSize], tag[:])
+	return out[:off+ControlAuthTagSize], nil
 }
 
-func DecodePunchCoord(pkt []byte) (sender types.PublicKey, isReply bool, natKind byte, portStep int16, endpoints []types.Endpoint, err error) {
-	pType, flags, body, err := ParseHeader(pkt)
+// DecodeAndVerifyPunchCoord decodes and cryptographically verifies an authenticated PacketPunchCoord message.
+func DecodeAndVerifyPunchCoord(pkt []byte, localPub types.PublicKey, verify func(sender types.PublicKey, data []byte, tag [ControlAuthTagSize]byte) bool) (sender types.PublicKey, isReply bool, natKind byte, portStep int16, txNano int64, endpoints []types.Endpoint, err error) {
+	pType, flags, _, err := ParseHeader(pkt)
 	if err != nil {
-		return sender, false, 0, 0, nil, err
+		return sender, false, 0, 0, 0, nil, err
 	}
-	if pType != PacketPunchCoord || len(body) < 36 {
-		return sender, false, 0, 0, nil, ErrShortPacket
+	if pType != PacketPunchCoord {
+		return sender, false, 0, 0, 0, nil, ErrShortPacket
 	}
+	if flags&FlagControlAuth == 0 {
+		return sender, false, 0, 0, 0, nil, ErrControlUnauth
+	}
+	if len(pkt) < HeaderMinSize+44+ControlAuthTagSize {
+		return sender, false, 0, 0, 0, nil, ErrShortPacket
+	}
+	baseLen := len(pkt) - ControlAuthTagSize
+	body := pkt[HeaderMinSize:baseLen]
 	copy(sender[:], body[0:32])
-	natKind = body[32]
-	portStep = int16(binary.BigEndian.Uint16(body[33:35]))
-	count := int(body[35])
-	off := 36
+	txNano = int64(binary.BigEndian.Uint64(body[32:40]))
+	natKind = body[40]
+	portStep = int16(binary.BigEndian.Uint16(body[41:43]))
+	count := int(body[43])
+	if count > 16 {
+		return sender, false, 0, 0, 0, nil, ErrFrameTooLarge
+	}
+	off := 44
 	endpoints = make([]types.Endpoint, 0, count)
 	for i := 0; i < count; i++ {
 		if off >= len(body) {
-			return sender, false, 0, 0, nil, ErrShortPacket
+			return sender, false, 0, 0, 0, nil, ErrShortPacket
 		}
 		pLen := int(body[off])
 		off++
 		if off+pLen >= len(body) {
-			return sender, false, 0, 0, nil, ErrShortPacket
+			return sender, false, 0, 0, 0, nil, ErrShortPacket
 		}
 		proto := types.TransportProto(body[off : off+pLen])
 		off += pLen
 		aLen := int(body[off])
 		off++
 		if off+aLen > len(body) {
-			return sender, false, 0, 0, nil, ErrShortPacket
+			return sender, false, 0, 0, 0, nil, ErrShortPacket
 		}
 		addr := string(body[off : off+aLen])
 		off += aLen
 		endpoints = append(endpoints, types.Endpoint{Proto: proto, Addr: addr})
 	}
-	return sender, flags == 1, natKind, portStep, endpoints, nil
+	if off != len(body) {
+		return sender, false, 0, 0, 0, nil, ErrShortPacket
+	}
+	var tag [ControlAuthTagSize]byte
+	copy(tag[:], pkt[baseLen:])
+	if verify == nil || !verify(sender, buildControlAuthInput(localPub, pkt[:baseLen]), tag) {
+		return sender, false, 0, 0, 0, nil, ErrControlUnauth
+	}
+	return sender, (flags & FlagPunchReply) != 0, natKind, portStep, txNano, endpoints, nil
+}
+
+func buildControlAuthInput(targetPub types.PublicKey, rawPkt []byte) []byte {
+	out := make([]byte, 32+len(rawPkt))
+	copy(out[0:32], targetPub[:])
+	copy(out[32:], rawPkt)
+	return out
 }
 
 // RelayBindPacket binds a client's NodeKey on a stream connection to a Relay server.

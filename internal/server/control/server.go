@@ -2,6 +2,7 @@ package control
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,18 +23,37 @@ import (
 	"github.com/acktier/acktier/pkg/types"
 )
 
+const (
+	maxControlJSONBytes = 64 * 1024
+	maxACLJSONBytes     = 256 * 1024
+	maxEndpointsPerNode = 32
+	maxLinksPerNode     = 256
+	maxRoutesPerNode    = 64
+	maxHostnameChars    = 63
+)
+
 // Config configures the AckTier Control & Relay Server.
 type Config struct {
 	AdminToken  string
 	PublicHost  string // Hostname or IP advertised in RelayNode
-	RelayAddr   string // host:port advertised for TCP/HTTP relay
+	RelayAddr   string // host:port advertised for TCP/HTTPS relay
 	STUNAddr    string // Primary UDP STUN address host:port
 	STUNAltAddr string // Secondary UDP STUN address host:port for Cone/Symmetric classification
+	UseTLS      bool   // Advertise TLS requirement for Relay connections
 }
 
 type subscriber struct {
-	nodeID types.NodeID
-	ch     chan types.NetMap
+	nodeID  types.NodeID
+	nodeKey types.PublicKey
+	ch      chan types.NetMap
+	done    chan struct{}
+	once    sync.Once
+}
+
+func (sub *subscriber) close() {
+	sub.once.Do(func() {
+		close(sub.done)
+	})
 }
 
 // Server coordinates authentication, IPAM, NetMap distribution, Admin API, and Relay upgrades.
@@ -70,12 +90,19 @@ func (s *Server) Relay() *relay.Server {
 	return s.relay
 }
 
+func secretEqual(a, b string) bool {
+	if a == "" || b == "" || len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
 func (s *Server) authenticateNodeToken(nodeKey types.PublicKey, token string) bool {
-	if token == "" {
+	if nodeKey.IsZero() || token == "" {
 		return false
 	}
 	sn, ok := s.store.FindByNodeKey(nodeKey)
-	return ok && sn.NodeToken == token
+	return ok && secretEqual(sn.NodeToken, token)
 }
 
 // Handler returns the root HTTP mux serving Admin API, Node Control API, and `/relay` Upgrade.
@@ -87,7 +114,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revision": s.revision.Load()})
 	})
 
-	// Relay connection upgrade endpoint (single-port friendly!)
+	// Relay connection upgrade endpoint
 	mux.HandleFunc("GET /relay", s.handleRelayUpgrade)
 
 	// Node Control Plane endpoints
@@ -99,6 +126,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/admin/status", s.requireAdmin(s.handleAdminStatus))
 	mux.HandleFunc("GET /api/v1/admin/nodes", s.requireAdmin(s.handleAdminListNodes))
 	mux.HandleFunc("DELETE /api/v1/admin/nodes/{id}", s.requireAdmin(s.handleAdminDeleteNode))
+	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rekey", s.requireAdmin(s.handleAdminRekeyNode))
+	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rename", s.requireAdmin(s.handleAdminRenameNode))
 	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/routes/approve", s.requireAdmin(s.handleAdminApproveRoutes))
 	mux.HandleFunc("GET /api/v1/admin/keys", s.requireAdmin(s.handleAdminListKeys))
 	mux.HandleFunc("POST /api/v1/admin/keys", s.requireAdmin(s.handleAdminCreateKey))
@@ -112,8 +141,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if s.cfg.AdminToken == "" || auth != s.cfg.AdminToken {
+		auth := extractBearer(r)
+		if !secretEqual(s.cfg.AdminToken, auth) {
 			writeError(w, http.StatusUnauthorized, "invalid admin token")
 			return
 		}
@@ -122,26 +151,21 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func extractBearer(r *http.Request) string {
-	return strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	hdr := r.Header.Get("Authorization")
+	if len(hdr) < 7 || !strings.EqualFold(hdr[:7], "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(hdr[7:])
 }
 
-func sanitizeNodeName(hostname string, id types.NodeID) string {
-	name := strings.ToLower(strings.TrimSpace(hostname))
-	var b strings.Builder
-	for _, ch := range name {
-		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' {
-			b.WriteRune(ch)
-		} else if ch == '_' || ch == ' ' || ch == '.' {
-			b.WriteByte('-')
-		}
-	}
-	res := strings.Trim(b.String(), "-")
-	if res == "" {
-		return fmt.Sprintf("node-%d", id)
-	}
-	return res
+func decodeBoundedJSON(w http.ResponseWriter, r *http.Request, limit int64, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	dec := json.NewDecoder(r.Body)
+	return dec.Decode(dst)
 }
 
+// buildAllowedIPs computes ONLY authorized source-IP prefixes for a peer.
+// Default routes (0.0.0.0/0, ::/0) and any prefix overlapping overlay/special space are NEVER added to AllowedIPs!
 func buildAllowedIPs(n types.PeerNode) []netip.Prefix {
 	var out []netip.Prefix
 	if n.IPv4.IsValid() {
@@ -150,8 +174,77 @@ func buildAllowedIPs(n types.PeerNode) []netip.Prefix {
 	if n.IPv6.IsValid() {
 		out = append(out, netip.PrefixFrom(n.IPv6, 128))
 	}
-	out = append(out, n.ApprovedRoutes...)
+	for _, rt := range n.ApprovedRoutes {
+		if rt.Bits() > 0 && !types.OverlapsOverlayOrSpecial(rt) {
+			out = append(out, rt.Masked())
+		}
+	}
 	return out
+}
+
+func sanitizeEndpoints(in []types.Endpoint) []types.Endpoint {
+	if len(in) == 0 {
+		return nil
+	}
+	if len(in) > maxEndpointsPerNode {
+		in = in[:maxEndpointsPerNode]
+	}
+	out := make([]types.Endpoint, 0, len(in))
+	for _, ep := range in {
+		switch ep.Proto {
+		case types.ProtoUDP, types.ProtoTCP, types.ProtoQUIC, types.ProtoWSS:
+		default:
+			continue
+		}
+		host, portStr, err := net.SplitHostPort(strings.TrimSpace(ep.Addr))
+		if err != nil {
+			continue
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port <= 0 || port > 65535 {
+			continue
+		}
+		ip, err := netip.ParseAddr(host)
+		if err != nil {
+			continue // Only literal IP endpoints allowed (no DNS SSRF/amplification)
+		}
+		ip = ip.Unmap()
+		if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || types.IsOverlayAddr(ip) {
+			continue
+		}
+		out = append(out, types.Endpoint{
+			Proto: ep.Proto,
+			Addr:  net.JoinHostPort(ip.String(), strconv.Itoa(port)),
+			IsLAN: ep.IsLAN && ip.IsPrivate(),
+		})
+	}
+	return out
+}
+
+func sanitizeHostnameMeta(h string) string {
+	h = strings.TrimSpace(h)
+	if len(h) > maxHostnameChars {
+		h = h[:maxHostnameChars]
+	}
+	return h
+}
+
+func (s *Server) disconnectNodeSessions(nodeID types.NodeID, nodeKey types.PublicKey) {
+	if !nodeKey.IsZero() {
+		s.relay.Disconnect(nodeKey)
+	}
+	s.subMu.Lock()
+	var targets []*subscriber
+	for id, sub := range s.subscribers {
+		if sub.nodeID == nodeID || (!nodeKey.IsZero() && sub.nodeKey == nodeKey) {
+			targets = append(targets, sub)
+			delete(s.subscribers, id)
+		}
+	}
+	s.subMu.Unlock()
+	for _, sub := range targets {
+		sub.close()
+	}
 }
 
 func (s *Server) buildNetMapFor(selfID types.NodeID) (types.NetMap, bool) {
@@ -168,6 +261,8 @@ func (s *Server) buildNetMapFor(selfID types.NodeID) (types.NetMap, bool) {
 			self = n
 			found = true
 		} else {
+			// Never expose another node's MachineKey to peers!
+			n.MachineKey = types.PublicKey{}
 			peers = append(peers, n)
 		}
 	}
@@ -190,6 +285,7 @@ func (s *Server) buildNetMapFor(selfID types.NodeID) (types.NetMap, bool) {
 			RelayAddr:   s.cfg.RelayAddr,
 			STUNAddr:    s.cfg.STUNAddr,
 			STUNAltAddr: s.cfg.STUNAltAddr,
+			UseTLS:      s.cfg.UseTLS,
 		})
 	}
 
@@ -221,7 +317,6 @@ func (s *Server) broadcastTopologyChange() {
 		select {
 		case sub.ch <- nm:
 		default:
-			// Replace stale unread snapshot with latest
 			select {
 			case <-sub.ch:
 			default:
@@ -236,40 +331,48 @@ func (s *Server) broadcastTopologyChange() {
 
 func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 	var req types.RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
+	if err := decodeBoundedJSON(w, r, maxControlJSONBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or oversized json body")
 		return
 	}
 	if req.MachineKey.IsZero() || req.NodeKey.IsZero() {
 		writeError(w, http.StatusBadRequest, "machineKey and nodeKey are required")
 		return
 	}
+	if len(req.AdvertisedRoutes) > maxRoutesPerNode {
+		req.AdvertisedRoutes = req.AdvertisedRoutes[:maxRoutesPerNode]
+	}
+	cleanEps := sanitizeEndpoints(req.Endpoints)
+	cleanHost := sanitizeHostnameMeta(req.Hostname)
+
+	// Prevent NodeKey collision across distinct machines.
+	if otherByNK, nkTaken := s.store.FindByNodeKey(req.NodeKey); nkTaken && otherByNK.Node.MachineKey != req.MachineKey {
+		writeError(w, http.StatusConflict, "nodeKey is already registered to another device")
+		return
+	}
 
 	now := time.Now().UTC()
 	existing, exists := s.store.FindByMachineKey(req.MachineKey)
 	if exists {
+		// SECURITY INVARIANT: Existing nodes can ONLY re-authenticate or rotate NodeKey using their valid NodeToken.
+		// PreAuthKeys are strictly for creating new nodes and CANNOT take over an existing MachineKey!
 		bearer := extractBearer(r)
-		if bearer != existing.NodeToken {
-			// Allow re-auth with a valid PreAuthKey
-			if req.AuthKey == "" {
-				writeError(w, http.StatusUnauthorized, "node token or authKey required")
-				return
-			}
-			if _, err := s.store.ConsumePreAuthKey(req.AuthKey); err != nil {
-				writeError(w, http.StatusUnauthorized, err.Error())
-				return
-			}
+		if !secretEqual(existing.NodeToken, bearer) {
+			writeError(w, http.StatusForbidden, "machine already registered; valid node token required (pre-auth keys cannot take over existing nodes)")
+			return
 		}
+
+		oldNodeKey := existing.Node.NodeKey
 		existing.Node.NodeKey = req.NodeKey
-		if req.Hostname != "" {
-			existing.Node.Hostname = req.Hostname
-			existing.Node.Name = sanitizeNodeName(req.Hostname, existing.Node.ID)
+		if cleanHost != "" {
+			existing.Node.Hostname = cleanHost
+			// Note: existing.Node.Name is server-assigned and immutable by the node itself!
 		}
 		if req.OS != "" {
-			existing.Node.OS = req.OS
+			existing.Node.OS = sanitizeHostnameMeta(req.OS)
 		}
-		if len(req.Endpoints) > 0 {
-			existing.Node.Endpoints = req.Endpoints
+		if cleanEps != nil {
+			existing.Node.Endpoints = cleanEps
 		}
 		if req.AdvertisedRoutes != nil {
 			existing.Node.AdvertisedRoutes = req.AdvertisedRoutes
@@ -282,6 +385,9 @@ func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if oldNodeKey != req.NodeKey {
+			s.disconnectNodeSessions(existing.Node.ID, oldNodeKey)
+		}
 		s.broadcastTopologyChange()
 		nm, _ := s.buildNetMapFor(existing.Node.ID)
 		writeJSON(w, http.StatusOK, types.RegisterResponse{
@@ -291,8 +397,8 @@ func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// New machine registration requires PreAuthKey
-	pak, err := s.store.ConsumePreAuthKey(req.AuthKey)
+	// New machine registration requires a valid PreAuthKey.
+	pak, err := s.store.ConsumePreAuthKey(strings.TrimSpace(req.AuthKey))
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "valid pre-auth key required for new node")
 		return
@@ -305,16 +411,17 @@ func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := s.store.NextID()
+	uniqueName := s.store.AllocateUniqueName(cleanHost, id)
 	node := types.PeerNode{
 		ID:               id,
-		Name:             sanitizeNodeName(req.Hostname, id),
-		Hostname:         req.Hostname,
-		OS:               req.OS,
+		Name:             uniqueName,
+		Hostname:         cleanHost,
+		OS:               sanitizeHostnameMeta(req.OS),
 		MachineKey:       req.MachineKey,
 		NodeKey:          req.NodeKey,
 		IPv4:             v4,
 		IPv6:             v6,
-		Endpoints:        req.Endpoints,
+		Endpoints:        cleanEps,
 		AdvertisedRoutes: req.AdvertisedRoutes,
 		CanRelay:         req.CanRelay,
 		PreferredRelayID: req.PreferredRelayID,
@@ -330,7 +437,7 @@ func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	saved, _ := s.store.GetNode(id)
-	log.Printf("[control] registered node #%d (%s) -> %s", id, node.Name, v4)
+	log.Printf("[control] registered node #%d (%s) -> %s", id, saved.Node.Name, v4)
 
 	s.broadcastTopologyChange()
 	nm, _ := s.buildNetMapFor(id)
@@ -341,29 +448,45 @@ func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
+	// Reject unauthenticated callers BEFORE decoding large request bodies if header is absent!
+	bearer := extractBearer(r)
+	if bearer == "" {
+		writeError(w, http.StatusUnauthorized, "missing bearer token")
+		return
+	}
 	var req types.HeartbeatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
+	if err := decodeBoundedJSON(w, r, maxControlJSONBytes, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or oversized json")
 		return
 	}
 	sn, ok := s.store.FindByNodeKey(req.NodeKey)
-	if !ok || sn.NodeToken != extractBearer(r) {
+	if !ok || !secretEqual(sn.NodeToken, bearer) {
 		writeError(w, http.StatusUnauthorized, "unauthorized node")
 		return
+	}
+
+	cleanEps := sanitizeEndpoints(req.Endpoints)
+	links := req.Links
+	if len(links) > maxLinksPerNode {
+		links = links[:maxLinksPerNode]
+	}
+	routes := req.AdvertisedRoutes
+	if len(routes) > maxRoutesPerNode {
+		routes = routes[:maxRoutesPerNode]
 	}
 
 	changed := !sn.Node.Online ||
 		sn.Node.CanRelay != req.CanRelay ||
 		sn.Node.PreferredRelayID != req.PreferredRelayID ||
-		!endpointsEqual(sn.Node.Endpoints, req.Endpoints) ||
-		!linksMeaningfullyChanged(sn.Node.Links, req.Links)
+		!endpointsEqual(sn.Node.Endpoints, cleanEps) ||
+		!linksMeaningfullyChanged(sn.Node.Links, links)
 
-	sn.Node.Endpoints = req.Endpoints
-	if req.Links != nil {
-		sn.Node.Links = req.Links
+	sn.Node.Endpoints = cleanEps
+	if links != nil {
+		sn.Node.Links = links
 	}
-	if req.AdvertisedRoutes != nil {
-		sn.Node.AdvertisedRoutes = req.AdvertisedRoutes
+	if routes != nil {
+		sn.Node.AdvertisedRoutes = routes
 	}
 	sn.Node.CanRelay = req.CanRelay
 	sn.Node.PreferredRelayID = req.PreferredRelayID
@@ -419,14 +542,19 @@ func linksMeaningfullyChanged(oldLinks, newLinks []types.PeerLink) bool {
 }
 
 func (s *Server) handleNodeMapStream(w http.ResponseWriter, r *http.Request) {
+	bearer := extractBearer(r)
+	if bearer == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized node")
+		return
+	}
 	nodeKeyStr := r.URL.Query().Get("nodeKey")
 	nodeKey, err := types.ParsePublicKey(nodeKeyStr)
-	if err != nil {
+	if err != nil || nodeKey.IsZero() {
 		writeError(w, http.StatusBadRequest, "invalid nodeKey query parameter")
 		return
 	}
 	sn, ok := s.store.FindByNodeKey(nodeKey)
-	if !ok || sn.NodeToken != extractBearer(r) {
+	if !ok || !secretEqual(sn.NodeToken, bearer) {
 		writeError(w, http.StatusUnauthorized, "unauthorized node")
 		return
 	}
@@ -437,7 +565,6 @@ func (s *Server) handleNodeMapStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mark node online upon stream connect
 	if !sn.Node.Online {
 		sn.Node.Online = true
 		sn.Node.LastSeen = time.Now().UTC()
@@ -446,8 +573,10 @@ func (s *Server) handleNodeMapStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sub := &subscriber{
-		nodeID: sn.Node.ID,
-		ch:     make(chan types.NetMap, 2),
+		nodeID:  sn.Node.ID,
+		nodeKey: sn.Node.NodeKey,
+		ch:      make(chan types.NetMap, 2),
+		done:    make(chan struct{}),
 	}
 	s.subMu.Lock()
 	s.nextSubID++
@@ -456,6 +585,7 @@ func (s *Server) handleNodeMapStream(w http.ResponseWriter, r *http.Request) {
 	s.subMu.Unlock()
 
 	defer func() {
+		sub.close()
 		s.subMu.Lock()
 		delete(s.subscribers, subID)
 		stillConnected := false
@@ -499,6 +629,8 @@ func (s *Server) handleNodeMapStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-sub.done:
+			return
 		case nm := <-sub.ch:
 			if err := enc.Encode(types.MapStreamEvent{
 				Type:   "netmap",
@@ -537,7 +669,6 @@ func (s *Server) handleRelayUpgrade(w http.ResponseWriter, r *http.Request) {
 	_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: acktier-relay\r\nConnection: Upgrade\r\n\r\n")
 	_ = rw.Flush()
 
-	// If bufio.Reader buffered any bytes after the HTTP request, wrap conn
 	if rw.Reader.Buffered() > 0 {
 		s.relay.ServeConn(&bufferedConn{Conn: conn, r: rw.Reader})
 		return
@@ -566,10 +697,10 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	relayClients, relayFrames, relayBytes := s.relay.Stats()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"totalNodes":          len(nodes),
-		"onlineNodes":         onlineCount,
-		"revision":            s.revision.Load(),
-		"relayConnectedNodes": relayClients,
+		"totalNodes":           len(nodes),
+		"onlineNodes":          onlineCount,
+		"revision":             s.revision.Load(),
+		"relayConnectedNodes":  relayClients,
 		"relayForwardedFrames": relayFrames,
 		"relayForwardedBytes":  relayBytes,
 	})
@@ -601,9 +732,100 @@ func (s *Server) handleAdminDeleteNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Immediately kick active Relay and MapStream connections for the revoked node!
+	s.disconnectNodeSessions(deleted.Node.ID, deleted.Node.NodeKey)
 	s.ipam.Release(deleted.Node.IPv4)
 	s.broadcastTopologyChange()
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": idNum})
+}
+
+// handleAdminRekeyNode provides an administrator-authenticated recovery flow to rotate a node's NodeToken
+// (and optionally replace its NodeKey/MachineKey) without allowing ordinary PreAuthKeys to hijack nodes.
+func (s *Server) handleAdminRekeyNode(w http.ResponseWriter, r *http.Request) {
+	idNum, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid node id")
+		return
+	}
+	var req struct {
+		MachineKey types.PublicKey `json:"machineKey,omitempty"`
+		NodeKey    types.PublicKey `json:"nodeKey,omitempty"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeBoundedJSON(w, r, maxControlJSONBytes, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+	}
+
+	sn, ok := s.store.GetNode(types.NodeID(idNum))
+	if !ok {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+	if !req.NodeKey.IsZero() {
+		if other, taken := s.store.FindByNodeKey(req.NodeKey); taken && other.Node.ID != sn.Node.ID {
+			writeError(w, http.StatusConflict, "nodeKey already registered to another device")
+			return
+		}
+	}
+	if !req.MachineKey.IsZero() {
+		if other, taken := s.store.FindByMachineKey(req.MachineKey); taken && other.Node.ID != sn.Node.ID {
+			writeError(w, http.StatusConflict, "machineKey already registered to another device")
+			return
+		}
+	}
+
+	oldNodeKey := sn.Node.NodeKey
+	if !req.MachineKey.IsZero() {
+		sn.Node.MachineKey = req.MachineKey
+	}
+	if !req.NodeKey.IsZero() {
+		sn.Node.NodeKey = req.NodeKey
+	}
+	sn.NodeToken = store.GenerateNodeToken()
+	sn.Node.Online = false
+	if err := s.store.UpsertNode(sn); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.disconnectNodeSessions(sn.Node.ID, oldNodeKey)
+	s.broadcastTopologyChange()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodeId":    sn.Node.ID,
+		"nodeToken": sn.NodeToken,
+		"node":      sn.Node,
+	})
+}
+
+func (s *Server) handleAdminRenameNode(w http.ResponseWriter, r *http.Request) {
+	idNum, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid node id")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := decodeBoundedJSON(w, r, maxControlJSONBytes, &req); err != nil || strings.TrimSpace(req.Name) == "" {
+		writeError(w, http.StatusBadRequest, "valid name is required")
+		return
+	}
+	sn, err := s.store.RenameNode(types.NodeID(idNum), req.Name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "node not found")
+			return
+		}
+		if errors.Is(err, store.ErrNameConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.broadcastTopologyChange()
+	writeJSON(w, http.StatusOK, sn.Node)
 }
 
 func (s *Server) handleAdminApproveRoutes(w http.ResponseWriter, r *http.Request) {
@@ -615,16 +837,35 @@ func (s *Server) handleAdminApproveRoutes(w http.ResponseWriter, r *http.Request
 	var req struct {
 		Routes []netip.Prefix `json:"routes"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBoundedJSON(w, r, maxControlJSONBytes, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	if len(req.Routes) > maxRoutesPerNode {
+		writeError(w, http.StatusBadRequest, "too many routes")
+		return
+	}
+	normalized := make([]netip.Prefix, 0, len(req.Routes))
+	for _, rt := range req.Routes {
+		if !rt.IsValid() {
+			writeError(w, http.StatusBadRequest, "invalid route prefix")
+			return
+		}
+		masked := rt.Masked()
+		if masked.Bits() > 0 && types.OverlapsOverlayOrSpecial(masked) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("route %s overlaps protected overlay, loopback, link-local, or multicast space", masked))
+			return
+		}
+		normalized = append(normalized, masked)
+	}
+
 	sn, ok := s.store.GetNode(types.NodeID(idNum))
 	if !ok {
 		writeError(w, http.StatusNotFound, "node not found")
 		return
 	}
-	sn.Node.ApprovedRoutes = req.Routes
+	sn.Node.ApprovedRoutes = normalized
+	sn.Node.AllowedIPs = buildAllowedIPs(sn.Node)
 	_ = s.store.UpsertNode(sn)
 	s.broadcastTopologyChange()
 	writeJSON(w, http.StatusOK, sn.Node)
@@ -642,7 +883,12 @@ func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
 		Tags       []string `json:"tags"`
 		TTLSeconds int64    `json:"ttlSeconds"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if r.ContentLength != 0 {
+		if err := decodeBoundedJSON(w, r, maxControlJSONBytes, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+	}
 	ttl := 24 * time.Hour
 	if req.TTLSeconds > 0 {
 		ttl = time.Duration(req.TTLSeconds) * time.Second
@@ -670,8 +916,8 @@ func (s *Server) handleAdminGetACL(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminPutACL(w http.ResponseWriter, r *http.Request) {
 	var pol types.ACLPolicy
-	if err := json.NewDecoder(r.Body).Decode(&pol); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid acl policy json")
+	if err := decodeBoundedJSON(w, r, maxACLJSONBytes, &pol); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or oversized acl policy json")
 		return
 	}
 	if err := acl.Validate(pol); err != nil {
@@ -688,7 +934,7 @@ func (s *Server) handleAdminPutACL(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminPutDNS(w http.ResponseWriter, r *http.Request) {
 	var cfg types.DNSConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	if err := decodeBoundedJSON(w, r, maxControlJSONBytes, &cfg); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid dns config json")
 		return
 	}

@@ -7,16 +7,28 @@ import (
 )
 
 const (
-	ProtoICMPv4 uint8 = 1
-	ProtoTCP    uint8 = 6
-	ProtoUDP    uint8 = 17
-	ProtoICMPv6 uint8 = 58
+	ProtoHopByHop   uint8 = 0
+	ProtoICMPv4     uint8 = 1
+	ProtoTCP        uint8 = 6
+	ProtoUDP        uint8 = 17
+	ProtoIPv6Route  uint8 = 43
+	ProtoIPv6Frag   uint8 = 44
+	ProtoICMPv6     uint8 = 58
+	ProtoIPv6NoNext uint8 = 59
+	ProtoIPv6Dest   uint8 = 60
+
+	maxIPv6ExtHeaders = 4
 
 	TCPFlagFIN uint8 = 0x01
 	TCPFlagSYN uint8 = 0x02
 	TCPFlagRST uint8 = 0x04
 	TCPFlagPSH uint8 = 0x08
 	TCPFlagACK uint8 = 0x10
+)
+
+var (
+	ErrFragmentedPacket  = errors.New("pktutil: fragmented IP packets are rejected by policy")
+	ErrUnsupportedHeader = errors.New("pktutil: unsupported IP extension header or L4 protocol")
 )
 
 // ParsedPacket holds decoded L3 (IPv4/IPv6) and L4 (TCP/UDP/ICMP) metadata and payload slice.
@@ -37,7 +49,8 @@ type ParsedPacket struct {
 	Payload  []byte
 }
 
-// Parse decodes an L3 IPv4 or IPv6 packet and its L4 transport header.
+// Parse decodes an L3 IPv4 or IPv6 packet, safely traverses supported IPv6 extension headers,
+// rejects fragmented or unsupported headers/protocols (default-deny), and extracts the L4 header.
 func Parse(raw []byte) (ParsedPacket, error) {
 	var p ParsedPacket
 	if len(raw) < 20 {
@@ -53,10 +66,19 @@ func Parse(raw []byte) (ParsedPacket, error) {
 		if ihl < 20 || len(raw) < ihl {
 			return p, errors.New("invalid ipv4 header length")
 		}
-		if totalLen >= ihl && totalLen <= len(raw) {
-			raw = raw[:totalLen]
+		if totalLen < ihl || totalLen > len(raw) {
+			return p, errors.New("invalid ipv4 total length")
+		}
+		raw = raw[:totalLen]
+		// Reject IPv4 fragments (MoreFragments=0x2000 or FragmentOffset=0x1fff) to prevent L4 port-filter bypass!
+		flagsFrag := binary.BigEndian.Uint16(raw[6:8])
+		if (flagsFrag & 0x3fff) != 0 {
+			return p, ErrFragmentedPacket
 		}
 		p.Proto = raw[9]
+		if p.Proto != ProtoTCP && p.Proto != ProtoUDP && p.Proto != ProtoICMPv4 {
+			return p, ErrUnsupportedHeader
+		}
 		var s4, d4 [4]byte
 		copy(s4[:], raw[12:16])
 		copy(d4[:], raw[16:20])
@@ -69,16 +91,61 @@ func Parse(raw []byte) (ParsedPacket, error) {
 			return p, errors.New("invalid ipv6 header length")
 		}
 		payloadLen := int(binary.BigEndian.Uint16(raw[4:6]))
-		if 40+payloadLen <= len(raw) {
-			raw = raw[:40+payloadLen]
+		if 40+payloadLen > len(raw) {
+			return p, errors.New("truncated ipv6 payload")
 		}
-		p.Proto = raw[6]
+		raw = raw[:40+payloadLen]
+		nextHdr := raw[6]
 		var s6, d6 [16]byte
 		copy(s6[:], raw[8:24])
 		copy(d6[:], raw[24:40])
 		p.SrcIP = netip.AddrFrom16(s6)
 		p.DstIP = netip.AddrFrom16(d6)
 		l4 = raw[40:]
+
+		// Walk benign IPv6 extension headers; reject Fragment, active Routing, AH/ESP, or unknown headers!
+		for extCount := 0; ; extCount++ {
+			switch nextHdr {
+			case ProtoHopByHop, ProtoIPv6Dest:
+				if extCount >= maxIPv6ExtHeaders || len(l4) < 8 {
+					return p, ErrUnsupportedHeader
+				}
+				hdrLen := (int(l4[1]) + 1) * 8
+				if len(l4) < hdrLen {
+					return p, errors.New("truncated ipv6 extension header")
+				}
+				nextHdr = l4[0]
+				l4 = l4[hdrLen:]
+				continue
+
+			case ProtoIPv6Route:
+				if extCount >= maxIPv6ExtHeaders || len(l4) < 8 {
+					return p, ErrUnsupportedHeader
+				}
+				segmentsLeft := l4[3]
+				if segmentsLeft != 0 {
+					// Source-routed IPv6 packets with remaining segments can rewrite DstIP!
+					return p, ErrUnsupportedHeader
+				}
+				hdrLen := (int(l4[1]) + 1) * 8
+				if len(l4) < hdrLen {
+					return p, errors.New("truncated ipv6 routing header")
+				}
+				nextHdr = l4[0]
+				l4 = l4[hdrLen:]
+				continue
+
+			case ProtoIPv6Frag:
+				return p, ErrFragmentedPacket
+
+			case ProtoTCP, ProtoUDP, ProtoICMPv6:
+				p.Proto = nextHdr
+
+			default:
+				return p, ErrUnsupportedHeader
+			}
+			break
+		}
 
 	default:
 		return p, errors.New("unsupported ip version")
@@ -120,12 +187,12 @@ func Parse(raw []byte) (ParsedPacket, error) {
 			p.Payload = l4[8:]
 		}
 	default:
-		p.Payload = l4
+		return p, ErrUnsupportedHeader
 	}
 	return p, nil
 }
 
-// BuildUDPPacket constructs a complete L3+UDP packet with valid IPv4/UDP checksums.
+// BuildUDPPacket constructs a complete L3+UDP packet with valid IPv4/IPv6 + UDP checksums.
 func BuildUDPPacket(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, payload []byte) []byte {
 	udpLen := 8 + len(payload)
 	udpSeg := make([]byte, udpLen)
@@ -142,7 +209,7 @@ func BuildUDPPacket(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, payload []
 	return wrapL3(srcIP, dstIP, ProtoUDP, udpSeg)
 }
 
-// BuildTCPPacket constructs a complete L3+TCP segment with valid IPv4/TCP checksums.
+// BuildTCPPacket constructs a complete L3+TCP segment with valid IPv4/IPv6 + TCP checksums.
 func BuildTCPPacket(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, seq, ack uint32, flags uint8, window uint16, payload []byte) []byte {
 	tcpLen := 20 + len(payload)
 	tcpSeg := make([]byte, tcpLen)

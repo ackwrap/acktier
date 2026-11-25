@@ -221,6 +221,16 @@ func (d *QUICDriver) removeConn(addr string, qc *quicPeerConn) {
 	d.mu.Unlock()
 }
 
+// ResetConnections terminates all active QUIC peer sessions while keeping the listener bound.
+func (d *QUICDriver) ResetConnections() {
+	d.mu.Lock()
+	for k, qc := range d.conns {
+		_ = qc.conn.CloseWithError(0, "reset")
+		delete(d.conns, k)
+	}
+	d.mu.Unlock()
+}
+
 func (d *QUICDriver) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.closed)

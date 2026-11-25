@@ -1,9 +1,11 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -80,15 +82,20 @@ type pendingHandshake struct {
 }
 
 type peerEntry struct {
-	mu          sync.RWMutex
+	hsMu        sync.Mutex   // Serializes handshake init/ack state transitions to eliminate race windows
+	mu          sync.RWMutex // Guards active cipher, pending handshake pointer, and queued packets
 	peerPub     types.PublicKey
+	ctrlKey     [32]byte
+	hasCtrlKey  bool
 	lastInitTs  int64
+	lastCoordTs int64
 	pending     *pendingHandshake
 	active      *activeCipher
 	pendingPkts [][]byte
 }
 
-// Manager manages Noise-style X25519 + HKDF-SHA256 + AES-256-GCM E2EE sessions with all authorized peers.
+// Manager manages Noise-style X25519 + HKDF-SHA256 + AES-256-GCM E2EE sessions
+// and static-key HMAC authentication for control/probe packets with all authorized peers.
 type Manager struct {
 	localPriv types.PrivateKey
 	localPub  types.PublicKey
@@ -112,6 +119,7 @@ func (m *Manager) LocalPublicKey() types.PublicKey {
 }
 
 // SetAuthorizedPeers synchronizes the allowed peer public keys from the latest NetMap.
+// Removed peers have their session keys and pending handshakes destroyed immediately.
 func (m *Manager) SetAuthorizedPeers(peerKeys []types.PublicKey) {
 	allowed := make(map[types.PublicKey]bool, len(peerKeys))
 	for _, k := range peerKeys {
@@ -123,25 +131,89 @@ func (m *Manager) SetAuthorizedPeers(peerKeys []types.PublicKey) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Remove peers no longer authorized
 	for k, pe := range m.peers {
 		if !allowed[k] {
+			pe.mu.Lock()
+			pe.active = nil
+			pe.pending = nil
+			pe.pendingPkts = nil
+			pe.mu.Unlock()
 			var pfx [8]byte
 			copy(pfx[:], pe.peerPub[:8])
 			delete(m.byPrefix, pfx)
 			delete(m.peers, k)
 		}
 	}
-	// Add new peers
+
 	for k := range allowed {
 		if _, exists := m.peers[k]; !exists {
 			pe := &peerEntry{peerPub: k}
+			if ck, err := derivePeerControlKey(m.localPriv, m.localPub, k); err == nil {
+				pe.ctrlKey = ck
+				pe.hasCtrlKey = true
+			}
 			m.peers[k] = pe
 			var pfx [8]byte
 			copy(pfx[:], k[:8])
 			m.byPrefix[pfx] = pe
 		}
 	}
+}
+
+// ResetSessions wipes all active E2EE sessions, pending handshakes, and peer authorizations (e.g. on `acktier down`).
+func (m *Manager) ResetSessions() {
+	m.SetAuthorizedPeers(nil)
+}
+
+// SignControl computes a 128-bit HMAC-SHA256 tag authenticating a control/probe packet to peerPub.
+func (m *Manager) SignControl(peerPub types.PublicKey, data []byte) ([protocol.ControlAuthTagSize]byte, error) {
+	var tag [protocol.ControlAuthTagSize]byte
+	m.mu.RLock()
+	pe := m.peers[peerPub]
+	m.mu.RUnlock()
+	if pe == nil || !pe.hasCtrlKey {
+		return tag, ErrUnknownPeer
+	}
+	mac := hmac.New(sha256.New, pe.ctrlKey[:])
+	_, _ = mac.Write(data)
+	sum := mac.Sum(nil)
+	copy(tag[:], sum[:protocol.ControlAuthTagSize])
+	return tag, nil
+}
+
+// VerifyControl validates a 128-bit HMAC-SHA256 tag from an authorized peer in constant time.
+func (m *Manager) VerifyControl(senderPub types.PublicKey, data []byte, tag [protocol.ControlAuthTagSize]byte) bool {
+	m.mu.RLock()
+	pe := m.peers[senderPub]
+	m.mu.RUnlock()
+	if pe == nil || !pe.hasCtrlKey {
+		return false
+	}
+	mac := hmac.New(sha256.New, pe.ctrlKey[:])
+	_, _ = mac.Write(data)
+	sum := mac.Sum(nil)
+	return hmac.Equal(sum[:protocol.ControlAuthTagSize], tag[:])
+}
+
+// AcceptPunchCoordTimestamp enforces freshness and anti-replay monotonicity on authenticated PunchCoord messages.
+func (m *Manager) AcceptPunchCoordTimestamp(senderPub types.PublicKey, txNano int64) bool {
+	msgTime := time.Unix(0, txNano)
+	if diff := time.Since(msgTime); diff > 30*time.Second || diff < -30*time.Second {
+		return false
+	}
+	m.mu.RLock()
+	pe := m.peers[senderPub]
+	m.mu.RUnlock()
+	if pe == nil {
+		return false
+	}
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+	if txNano <= pe.lastCoordTs {
+		return false
+	}
+	pe.lastCoordTs = txNano
+	return true
 }
 
 // HasActiveSession reports whether an active AEAD session exists with peerPub.
@@ -184,6 +256,9 @@ func (m *Manager) InitiateHandshake(peerPub types.PublicKey) ([]byte, error) {
 	if pe == nil {
 		return nil, ErrUnknownPeer
 	}
+
+	pe.hsMu.Lock()
+	defer pe.hsMu.Unlock()
 
 	ephPriv, err := types.GeneratePrivateKey()
 	if err != nil {
@@ -243,6 +318,16 @@ func (m *Manager) HandleHandshakeInit(pkt []byte) (peerPub types.PublicKey, ackP
 		return peerPub, nil, nil, ErrHandshakeReplay
 	}
 
+	pe.hsMu.Lock()
+	defer pe.hsMu.Unlock()
+
+	pe.mu.RLock()
+	staleTs := tsNano <= pe.lastInitTs
+	pe.mu.RUnlock()
+	if staleTs {
+		return peerPub, nil, nil, ErrHandshakeReplay
+	}
+
 	ssStatic, err := m.localPriv.SharedSecret(initPub)
 	if err != nil {
 		return peerPub, nil, nil, err
@@ -265,14 +350,6 @@ func (m *Manager) HandleHandshakeInit(pkt []byte) (peerPub types.PublicKey, ackP
 	if err != nil || string(plain) != handshakeInitLabel {
 		return peerPub, nil, nil, errors.New("crypto: handshake init authentication failed")
 	}
-
-	pe.mu.Lock()
-	if tsNano <= pe.lastInitTs {
-		pe.mu.Unlock()
-		return peerPub, nil, nil, ErrHandshakeReplay
-	}
-	pe.lastInitTs = tsNano
-	pe.mu.Unlock()
 
 	// Generate Responder ephemeral keypair for Forward Secrecy
 	respEphPriv, err := types.GeneratePrivateKey()
@@ -314,6 +391,11 @@ func (m *Manager) HandleHandshakeInit(pkt []byte) (peerPub types.PublicKey, ackP
 	ackPkt = protocol.EncodeHandshakePacket(protocol.PacketHandshakeAck, m.localPub, respEphPub, ackTs, ackProof)
 
 	pe.mu.Lock()
+	if tsNano <= pe.lastInitTs {
+		pe.mu.Unlock()
+		return peerPub, nil, nil, ErrHandshakeReplay
+	}
+	pe.lastInitTs = tsNano
 	pe.active = &activeCipher{
 		txAEAD:      txAEAD,
 		rxAEAD:      rxAEAD,
@@ -326,11 +408,17 @@ func (m *Manager) HandleHandshakeInit(pkt []byte) (peerPub types.PublicKey, ackP
 	return initPub, ackPkt, queuedPlain, nil
 }
 
-// HandleHandshakeAck validates HandshakeAck, installs initiator session keys, and drains queued outbound packets.
+// HandleHandshakeAck validates HandshakeAck, atomically consumes pending handshake state once,
+// installs initiator session keys without ever resetting txCounter on duplicate ACKs, and drains queued packets.
 func (m *Manager) HandleHandshakeAck(pkt []byte) (peerPub types.PublicKey, queuedPlain [][]byte, err error) {
 	pType, respPub, respEphPub, ackTs, ackProof, err := protocol.DecodeHandshakePacket(pkt)
 	if err != nil || pType != protocol.PacketHandshakeAck {
 		return peerPub, nil, errors.New("crypto: malformed handshake ack")
+	}
+
+	msgTime := time.Unix(0, ackTs)
+	if diff := time.Since(msgTime); diff > maxClockSkew || diff < -maxClockSkew {
+		return peerPub, nil, ErrHandshakeReplay
 	}
 
 	m.mu.RLock()
@@ -340,11 +428,15 @@ func (m *Manager) HandleHandshakeAck(pkt []byte) (peerPub types.PublicKey, queue
 		return peerPub, nil, ErrUnknownPeer
 	}
 
+	// Serialize handshake processing per peer AND verify single-consumption of `pend` inside `pe.mu.Lock()`!
+	pe.hsMu.Lock()
+	defer pe.hsMu.Unlock()
+
 	pe.mu.RLock()
 	pend := pe.pending
 	pe.mu.RUnlock()
 	if pend == nil || time.Since(pend.createdAt) > 30*time.Second {
-		return peerPub, nil, errors.New("crypto: no matching pending handshake")
+		return peerPub, nil, ErrHandshakeReplay
 	}
 
 	ssStatic, err := m.localPriv.SharedSecret(respPub)
@@ -390,12 +482,17 @@ func (m *Manager) HandleHandshakeAck(pkt []byte) (peerPub types.PublicKey, queue
 	}
 
 	pe.mu.Lock()
+	// CRITICAL NONCE-REUSE GUARD: verify `pe.pending` is still the exact unconsumed `pend` instance!
+	if pe.pending != pend {
+		pe.mu.Unlock()
+		return peerPub, nil, ErrHandshakeReplay
+	}
+	pe.pending = nil
 	pe.active = &activeCipher{
 		txAEAD:      txAEAD,
 		rxAEAD:      rxAEAD,
 		established: time.Now(),
 	}
-	pe.pending = nil
 	queuedPlain = pe.pendingPkts
 	pe.pendingPkts = nil
 	pe.mu.Unlock()
@@ -482,6 +579,28 @@ func buildHandshakeAAD(staticPub, ephPub types.PublicKey, tsNano int64) []byte {
 	copy(out[32:64], ephPub[:])
 	binary.BigEndian.PutUint64(out[64:72], uint64(tsNano))
 	return out
+}
+
+func derivePeerControlKey(localPriv types.PrivateKey, localPub, peerPub types.PublicKey) ([32]byte, error) {
+	var out [32]byte
+	ss, err := localPriv.SharedSecret(peerPub)
+	if err != nil {
+		return out, err
+	}
+	var info [64]byte
+	if bytes.Compare(localPub[:], peerPub[:]) <= 0 {
+		copy(info[0:32], localPub[:])
+		copy(info[32:64], peerPub[:])
+	} else {
+		copy(info[0:32], peerPub[:])
+		copy(info[32:64], localPub[:])
+	}
+	raw, err := hkdf.Key(sha256.New, ss[:], []byte("acktier-ctrl-mac-salt-v1"), string(info[:]), 32)
+	if err != nil {
+		return out, err
+	}
+	copy(out[:], raw)
+	return out, nil
 }
 
 func deriveHandshakeInitKey(ssStatic, ssInit [32]byte, initPub, respPub, initEph types.PublicKey) ([32]byte, error) {

@@ -138,10 +138,11 @@ func TestPhase4MagicDNSStatefulACLSubnetRouterAndExitNode(t *testing.T) {
 	_ = appResp.Body.Close()
 
 	// Wait for live NetMap stream to push approved routes to laptop-dev
+	// Note: 0.0.0.0/0 is kept out of AllowedIPs (source authorization) and tracked in ApprovedRoutes!
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		st := engClient.Status()
-		if len(st.Peers) == 1 && len(st.Peers[0].AllowedIPs) >= 4 {
+		if len(st.Peers) == 1 && len(st.Peers[0].ApprovedRoutes) >= 2 && len(st.Peers[0].AllowedIPs) == 3 {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)

@@ -7,20 +7,30 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/acktier/acktier/internal/secfile"
 	"github.com/acktier/acktier/pkg/types"
 )
 
 var (
-	ErrNotFound      = errors.New("store: record not found")
+	ErrNotFound       = errors.New("store: record not found")
 	ErrInvalidAuthKey = errors.New("store: invalid, expired, or exhausted auth key")
+	ErrNameConflict   = errors.New("store: node DNS name already assigned to another node")
 )
 
-// StoredNode wraps PeerNode with server-side authentication secret hash/token.
+var reservedDNSLabels = map[string]bool{
+	"localhost": true,
+	"wpad":      true,
+	"isatap":    true,
+	"acktier":   true,
+	"magicdns":  true,
+}
+
+// StoredNode wraps PeerNode with server-side authentication secret token.
 type StoredNode struct {
 	Node      types.PeerNode `json:"node"`
 	NodeToken string         `json:"nodeToken"`
@@ -35,7 +45,7 @@ type snapshot struct {
 	DNS         types.DNSConfig             `json:"dns"`
 }
 
-// FileStore provides concurrency-safe persistent storage backed by atomic JSON snapshots.
+// FileStore provides concurrency-safe persistent storage backed by owner-only atomic JSON snapshots.
 type FileStore struct {
 	mu   sync.RWMutex
 	path string
@@ -71,34 +81,109 @@ func NewFileStore(path string) (*FileStore, error) {
 		if s.data.NextNodeID < 1 {
 			s.data.NextNodeID = 1
 		}
+		s.ensureUniqueNodeNamesLocked()
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	return s, nil
 }
 
+// SanitizeDNSLabel converts an arbitrary hostname into a valid RFC 1123 lowercase DNS label.
+func SanitizeDNSLabel(hostname string, fallbackID types.NodeID) string {
+	name := strings.ToLower(strings.TrimSpace(hostname))
+	var b strings.Builder
+	prevDash := false
+	for _, ch := range name {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+			b.WriteRune(ch)
+			prevDash = false
+		} else if (ch == '-' || ch == '_' || ch == ' ' || ch == '.') && !prevDash && b.Len() > 0 {
+			b.WriteByte('-')
+			prevDash = true
+		}
+		if b.Len() >= 50 {
+			break
+		}
+	}
+	res := strings.Trim(b.String(), "-")
+	if res == "" || reservedDNSLabels[res] {
+		return fmt.Sprintf("node-%d", fallbackID)
+	}
+	return res
+}
+
+func (s *FileStore) ensureUniqueNodeNamesLocked() {
+	ids := make([]types.NodeID, 0, len(s.data.Nodes))
+	for id := range s.data.Nodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	used := make(map[string]types.NodeID, len(ids))
+	for _, id := range ids {
+		sn := s.data.Nodes[id]
+		base := SanitizeDNSLabel(sn.Node.Name, id)
+		candidate := base
+		for suffix := 2; ; suffix++ {
+			if owner, taken := used[candidate]; !taken || owner == id {
+				break
+			}
+			candidate = fmt.Sprintf("%s-%d", base, suffix)
+		}
+		sn.Node.Name = candidate
+		used[candidate] = id
+		s.data.Nodes[id] = sn
+	}
+}
+
+func (s *FileStore) isNameTakenLocked(name string, excludeID types.NodeID) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if reservedDNSLabels[name] {
+		return true
+	}
+	for id, sn := range s.data.Nodes {
+		if id != excludeID && strings.EqualFold(sn.Node.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// AllocateUniqueName assigns a globally unique server-managed DNS name for nodeID.
+func (s *FileStore) AllocateUniqueName(desiredHostname string, nodeID types.NodeID) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	base := SanitizeDNSLabel(desiredHostname, nodeID)
+	candidate := base
+	for suffix := 2; ; suffix++ {
+		if !s.isNameTakenLocked(candidate, nodeID) {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", base, suffix)
+	}
+}
+
 func (s *FileStore) saveLocked() error {
 	if s.path == "" {
 		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
 	}
 	raw, err := json.MarshalIndent(s.data, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return secfile.WritePrivate(s.path, raw)
 }
 
 func randomHex(nBytes int) string {
 	b := make([]byte, nBytes)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// GenerateNodeToken creates a fresh 192-bit random bearer token for a registered node.
+func GenerateNodeToken() string {
+	return "ntok_" + randomHex(24)
 }
 
 func (s *FileStore) NextID() types.NodeID {
@@ -114,10 +199,38 @@ func (s *FileStore) UpsertNode(sn StoredNode) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sn.NodeToken == "" {
-		sn.NodeToken = "ntok_" + randomHex(24)
+		sn.NodeToken = GenerateNodeToken()
 	}
+	base := SanitizeDNSLabel(sn.Node.Name, sn.Node.ID)
+	if s.isNameTakenLocked(base, sn.Node.ID) {
+		for suffix := 2; ; suffix++ {
+			cand := fmt.Sprintf("%s-%d", base, suffix)
+			if !s.isNameTakenLocked(cand, sn.Node.ID) {
+				base = cand
+				break
+			}
+		}
+	}
+	sn.Node.Name = base
 	s.data.Nodes[sn.Node.ID] = sn
 	return s.saveLocked()
+}
+
+// RenameNode allows an administrator to explicitly assign a unique DNS name to an existing node.
+func (s *FileStore) RenameNode(id types.NodeID, newName string) (StoredNode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sn, ok := s.data.Nodes[id]
+	if !ok {
+		return StoredNode{}, ErrNotFound
+	}
+	clean := SanitizeDNSLabel(newName, id)
+	if s.isNameTakenLocked(clean, id) {
+		return StoredNode{}, ErrNameConflict
+	}
+	sn.Node.Name = clean
+	s.data.Nodes[id] = sn
+	return sn, s.saveLocked()
 }
 
 func (s *FileStore) FindByMachineKey(mk types.PublicKey) (StoredNode, bool) {
@@ -197,6 +310,9 @@ func (s *FileStore) CreatePreAuthKey(label string, reusable, ephemeral bool, tag
 func (s *FileStore) ConsumePreAuthKey(rawKey string) (types.PreAuthKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if rawKey == "" {
+		return types.PreAuthKey{}, ErrInvalidAuthKey
+	}
 	now := time.Now().UTC()
 	for id, pak := range s.data.PreAuthKeys {
 		if pak.Key != rawKey {

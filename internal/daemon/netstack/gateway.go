@@ -2,8 +2,8 @@ package netstack
 
 import (
 	"context"
-	"encoding/binary"
 	"crypto/rand"
+	"encoding/binary"
 	"io"
 	"net"
 	"net/netip"
@@ -13,12 +13,15 @@ import (
 	"time"
 
 	"github.com/acktier/acktier/internal/daemon/pktutil"
+	"github.com/acktier/acktier/pkg/types"
 )
 
 const (
-	tcpProxyMSS      = 1260
-	natFlowIdleTTL   = 2 * time.Minute
+	tcpProxyMSS    = 1260
+	natFlowIdleTTL = 2 * time.Minute
 )
+
+var magicDNSAddrV4 = netip.MustParseAddr("100.100.100.100")
 
 // DialStreamFunc dials an outbound TCP connection on the Subnet Router / Exit Node host.
 type DialStreamFunc func(ctx context.Context, network, address string) (net.Conn, error)
@@ -34,14 +37,14 @@ type flowTuple struct {
 }
 
 type tcpFlow struct {
-	mu         sync.Mutex
-	tuple      flowTuple
-	conn       net.Conn
-	serverSeq  uint32
-	clientNext uint32
+	mu          sync.Mutex
+	tuple       flowTuple
+	conn        net.Conn
+	serverSeq   uint32
+	clientNext  uint32
 	established bool
-	closed     bool
-	lastActive time.Time
+	closed      bool
+	lastActive  time.Time
 }
 
 type udpFlow struct {
@@ -52,12 +55,13 @@ type udpFlow struct {
 }
 
 // Gateway implements a zero-config Userspace L3->L4 NAT Gateway for Subnet Routers and Exit Nodes.
-// It translates raw overlay IPv4/IPv6 TCP, UDP, and ICMP packets into host-outbound sockets
-// without requiring OS kernel IP forwarding, iptables, or Windows NAT rules!
+// It strictly blocks SSRF attempts toward host loopback, link-local/IMDS, overlay IPs, and host management interfaces.
 type Gateway struct {
-	dialTCP DialStreamFunc
-	dialUDP DialPacketFunc
-	sendBack func(l3ReplyPkt []byte) // Sends return L3 packet back into the encrypted overlay tunnel
+	dialTCP     DialStreamFunc
+	dialUDP     DialPacketFunc
+	sendBack    func(l3ReplyPkt []byte)
+	hostCheckMu sync.RWMutex
+	isHostIP    func(netip.Addr) bool
 
 	tcpMu    sync.RWMutex
 	tcpFlows map[flowTuple]*tcpFlow
@@ -67,6 +71,7 @@ type Gateway struct {
 
 	proxiedPkts  atomic.Uint64
 	proxiedBytes atomic.Uint64
+	blockedPkts  atomic.Uint64
 	closed       chan struct{}
 	closeOnce    sync.Once
 }
@@ -92,14 +97,97 @@ func NewGateway(dialTCP DialStreamFunc, dialUDP DialPacketFunc, sendBack func(l3
 	return g
 }
 
+// SetHostProtectedIPCheck registers a dynamic callback returning true if dstIP belongs to the gateway host itself
+// (such as host NIC addresses, LocalAPI address, or Control Server management address).
+func (g *Gateway) SetHostProtectedIPCheck(fn func(netip.Addr) bool) {
+	g.hostCheckMu.Lock()
+	g.isHostIP = fn
+	g.hostCheckMu.Unlock()
+}
+
+// IsForbiddenDestination reports whether dstIP must never be proxied by an Exit Node or Subnet Router
+// (loopback 127.0.0.0/8 & ::1, link-local 169.254.0.0/16 IMDS & fe80::/10, multicast, overlay space, or host local IPs).
+func (g *Gateway) IsForbiddenDestination(dstIP netip.Addr) bool {
+	if !dstIP.IsValid() {
+		return true
+	}
+	ip := dstIP.Unmap()
+	if types.IsSpecialNonRoutableAddr(ip) || types.IsOverlayAddr(ip) || ip == magicDNSAddrV4 {
+		return true
+	}
+	g.hostCheckMu.RLock()
+	fn := g.isHostIP
+	g.hostCheckMu.RUnlock()
+	if fn != nil && fn(ip) {
+		return true
+	}
+	return false
+}
+
 func (g *Gateway) Stats() (packets, bytes uint64) {
 	return g.proxiedPkts.Load(), g.proxiedBytes.Load()
+}
+
+func (g *Gateway) BlockedPackets() uint64 {
+	return g.blockedPkts.Load()
+}
+
+// ResetFlows immediately terminates all active proxied TCP and UDP flows (e.g. on `acktier down`).
+func (g *Gateway) ResetFlows() {
+	g.tcpMu.Lock()
+	for k, tf := range g.tcpFlows {
+		tf.mu.Lock()
+		tf.closed = true
+		_ = tf.conn.Close()
+		tf.mu.Unlock()
+		delete(g.tcpFlows, k)
+	}
+	g.tcpMu.Unlock()
+
+	g.udpMu.Lock()
+	for k, uf := range g.udpFlows {
+		uf.closeOnce.Do(func() { _ = uf.conn.Close() })
+		delete(g.udpFlows, k)
+	}
+	g.udpMu.Unlock()
+}
+
+// RevalidateFlows closes any active proxied TCP/UDP flow no longer permitted by the given predicate
+// (called when ACLs, peer memberships, or approved routes are updated).
+func (g *Gateway) RevalidateFlows(allow func(srcIP netip.Addr, srcPort uint16, dstIP netip.Addr, dstPort uint16, proto uint8) bool) {
+	if allow == nil {
+		return
+	}
+	g.tcpMu.Lock()
+	for k, tf := range g.tcpFlows {
+		if g.IsForbiddenDestination(k.dstIP) || !allow(k.srcIP, k.srcPort, k.dstIP, k.dstPort, pktutil.ProtoTCP) {
+			tf.mu.Lock()
+			tf.closed = true
+			_ = tf.conn.Close()
+			tf.mu.Unlock()
+			delete(g.tcpFlows, k)
+		}
+	}
+	g.tcpMu.Unlock()
+
+	g.udpMu.Lock()
+	for k, uf := range g.udpFlows {
+		if g.IsForbiddenDestination(k.dstIP) || !allow(k.srcIP, k.srcPort, k.dstIP, k.dstPort, pktutil.ProtoUDP) {
+			uf.closeOnce.Do(func() { _ = uf.conn.Close() })
+			delete(g.udpFlows, k)
+		}
+	}
+	g.udpMu.Unlock()
 }
 
 // HandlePacket processes an inbound decrypted L3 packet addressed to an approved subnet or Exit Node destination.
 func (g *Gateway) HandlePacket(raw []byte) bool {
 	pkt, err := pktutil.Parse(raw)
 	if err != nil {
+		return false
+	}
+	if g.IsForbiddenDestination(pkt.DstIP) {
+		g.blockedPkts.Add(1)
 		return false
 	}
 	g.proxiedPkts.Add(1)
@@ -113,10 +201,16 @@ func (g *Gateway) HandlePacket(raw []byte) bool {
 		return true
 
 	case pktutil.ProtoUDP:
+		if pkt.DstPort == 0 {
+			return false
+		}
 		g.handleUDP(pkt)
 		return true
 
 	case pktutil.ProtoTCP:
+		if pkt.DstPort == 0 {
+			return false
+		}
 		g.handleTCP(pkt)
 		return true
 	}
@@ -136,6 +230,10 @@ func (g *Gateway) handleUDP(pkt pktutil.ParsedPacket) {
 	g.udpMu.RUnlock()
 
 	if uf == nil {
+		if g.IsForbiddenDestination(pkt.DstIP) {
+			g.blockedPkts.Add(1)
+			return
+		}
 		targetAddr := net.JoinHostPort(pkt.DstIP.String(), strconv.Itoa(int(pkt.DstPort)))
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		conn, err := g.dialUDP(ctx, "udp", targetAddr)
@@ -205,7 +303,7 @@ func (g *Gateway) handleTCP(pkt pktutil.ParsedPacket) {
 	tf := g.tcpFlows[ft]
 	g.tcpMu.RUnlock()
 	if tf == nil {
-		if (pkt.TCPFlags & pktutil.TCPFlagRST) == 0 && g.sendBack != nil {
+		if (pkt.TCPFlags&pktutil.TCPFlagRST) == 0 && g.sendBack != nil {
 			rst := pktutil.BuildTCPPacket(ft.dstIP, ft.srcIP, ft.dstPort, ft.srcPort, pkt.AckNum, pkt.SeqNum+1, pktutil.TCPFlagRST|pktutil.TCPFlagACK, 0, nil)
 			g.sendBack(rst)
 		}
@@ -223,7 +321,6 @@ func (g *Gateway) handleTCP(pkt pktutil.ParsedPacket) {
 		tf.established = true
 	}
 
-	// Deliver in-order payload to outbound TCP socket
 	if len(pkt.Payload) > 0 && pkt.SeqNum == tf.clientNext {
 		_ = tf.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		n, err := tf.conn.Write(pkt.Payload)
@@ -240,7 +337,6 @@ func (g *Gateway) handleTCP(pkt pktutil.ParsedPacket) {
 		}
 		return
 	} else if len(pkt.Payload) > 0 && pkt.SeqNum < tf.clientNext {
-		// Retransmission of already ACKed segment -> re-ACK current clientNext
 		ackPkt := pktutil.BuildTCPPacket(ft.dstIP, ft.srcIP, ft.dstPort, ft.srcPort, tf.serverSeq, tf.clientNext, pktutil.TCPFlagACK, 65535, nil)
 		tf.mu.Unlock()
 		if g.sendBack != nil {
@@ -266,6 +362,10 @@ func (g *Gateway) handleTCP(pkt pktutil.ParsedPacket) {
 }
 
 func (g *Gateway) acceptTCPSyn(ft flowTuple, clientISN uint32) {
+	if g.IsForbiddenDestination(ft.dstIP) {
+		g.blockedPkts.Add(1)
+		return
+	}
 	targetAddr := net.JoinHostPort(ft.dstIP.String(), strconv.Itoa(int(ft.dstPort)))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	conn, err := g.dialTCP(ctx, "tcp", targetAddr)
@@ -297,7 +397,6 @@ func (g *Gateway) acceptTCPSyn(ft flowTuple, clientISN uint32) {
 	g.tcpFlows[ft] = tf
 	g.tcpMu.Unlock()
 
-	// Send SYN-ACK back to peer!
 	if g.sendBack != nil {
 		synAck := pktutil.BuildTCPPacket(ft.dstIP, ft.srcIP, ft.dstPort, ft.srcPort, serverISN, clientISN+1, pktutil.TCPFlagSYN|pktutil.TCPFlagACK, 65535, nil)
 		g.sendBack(synAck)
@@ -386,19 +485,7 @@ func (g *Gateway) gcLoop() {
 func (g *Gateway) Close() error {
 	g.closeOnce.Do(func() {
 		close(g.closed)
-		g.tcpMu.Lock()
-		for k, tf := range g.tcpFlows {
-			_ = tf.conn.Close()
-			delete(g.tcpFlows, k)
-		}
-		g.tcpMu.Unlock()
-
-		g.udpMu.Lock()
-		for k, uf := range g.udpFlows {
-			uf.closeOnce.Do(func() { _ = uf.conn.Close() })
-			delete(g.udpFlows, k)
-		}
-		g.udpMu.Unlock()
+		g.ResetFlows()
 	})
 	return nil
 }

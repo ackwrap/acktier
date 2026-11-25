@@ -52,13 +52,79 @@ func (pl PeerLink) EffectiveCostMs() float64 {
 	return rtt + 2.0*pl.JitterMillis + 300.0*pl.LossRate
 }
 
+// Overlay & special IP ranges used to separate destination routing from source-IP authorization.
+var (
+	OverlayIPv4Prefix   = netip.MustParsePrefix("100.64.0.0/10")
+	OverlayIPv6Prefix   = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+	loopbackIPv4Prefix  = netip.MustParsePrefix("127.0.0.0/8")
+	loopbackIPv6Prefix  = netip.MustParsePrefix("::1/128")
+	linkLocalIPv4Prefix = netip.MustParsePrefix("169.254.0.0/16")
+	linkLocalIPv6Prefix = netip.MustParsePrefix("fe80::/10")
+	multicastIPv4Prefix = netip.MustParsePrefix("224.0.0.0/4")
+	multicastIPv6Prefix = netip.MustParsePrefix("ff00::/8")
+	thisNetIPv4Prefix   = netip.MustParsePrefix("0.0.0.0/8")
+)
+
+// IsOverlayAddr reports whether ip belongs to AckTier's virtual CGNAT or ULA address space.
+func IsOverlayAddr(ip netip.Addr) bool {
+	if !ip.IsValid() {
+		return false
+	}
+	ip = ip.Unmap()
+	if ip.Is4() {
+		return OverlayIPv4Prefix.Contains(ip)
+	}
+	return OverlayIPv6Prefix.Contains(ip)
+}
+
+// IsSpecialNonRoutableAddr reports whether ip is loopback, unspecified, link-local, multicast, or broadcast.
+func IsSpecialNonRoutableAddr(ip netip.Addr) bool {
+	if !ip.IsValid() {
+		return true
+	}
+	ip = ip.Unmap()
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	if ip.Is4() {
+		a4 := ip.As4()
+		if a4[0] == 0 || (a4[0] == 255 && a4[1] == 255 && a4[2] == 255 && a4[3] == 255) {
+			return true
+		}
+	}
+	return false
+}
+
+// OverlapsOverlayOrSpecial reports whether a non-default CIDR (pfx.Bits() > 0) overlaps overlay,
+// loopback, link-local, unspecified, or multicast space and therefore must not be approved as a subnet route.
+func OverlapsOverlayOrSpecial(pfx netip.Prefix) bool {
+	if !pfx.IsValid() {
+		return true
+	}
+	pfx = pfx.Masked()
+	if pfx.Bits() == 0 {
+		return false
+	}
+	if pfx.Addr().Is4() {
+		return pfx.Overlaps(OverlayIPv4Prefix) ||
+			pfx.Overlaps(loopbackIPv4Prefix) ||
+			pfx.Overlaps(linkLocalIPv4Prefix) ||
+			pfx.Overlaps(multicastIPv4Prefix) ||
+			pfx.Overlaps(thisNetIPv4Prefix)
+	}
+	return pfx.Overlaps(OverlayIPv6Prefix) ||
+		pfx.Overlaps(loopbackIPv6Prefix) ||
+		pfx.Overlaps(linkLocalIPv6Prefix) ||
+		pfx.Overlaps(multicastIPv6Prefix)
+}
+
 // PeerNode represents a device in the AckTier overlay network.
 type PeerNode struct {
 	ID               NodeID         `json:"id"`
 	Name             string         `json:"name"`
 	Hostname         string         `json:"hostname"`
 	OS               string         `json:"os"`
-	MachineKey       PublicKey      `json:"machineKey"`
+	MachineKey       PublicKey      `json:"machineKey,omitempty"`
 	NodeKey          PublicKey      `json:"nodeKey"`
 	IPv4             netip.Addr     `json:"ipv4"`
 	IPv6             netip.Addr     `json:"ipv6"`

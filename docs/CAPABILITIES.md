@@ -8,13 +8,15 @@
 
 | 能力域 | 子能力项 | 当前状态 | 关键实现说明 |
 | :--- | :--- | :---: | :--- |
-| **控制与身份治理** | 双层公私钥身份 (`MachineKey` / `NodeKey`) | 已支持 | 设备物理身份持久化 + 会话加密公钥解耦 |
+| **控制与身份治理** | 双层公私钥身份 (`MachineKey` / `NodeKey`) | 已支持 | 设备物理身份持久化 + 会话加密公钥解耦；对端 NetMap 自动剥离 `MachineKey`，普通 `PreAuthKey` 仅限新建节点（禁止接管已有设备，恢复走管理员 `/rekey`） |
 | | `PreAuthKey` 预授权密钥体系 | 已支持 | 支持单次/可复用（Reusable）、过期时间、吊销与自动绑定设备 `tag:` |
 | | 双栈固定虚拟 IP 分配 (IPAM) | 已支持 | IPv4 `100.64.0.0/10` + IPv6 `fd7a:115c:a1e0::/48`，自动避让 `.0`/`.255` 与 `100.100.100.100` |
-| | 实时拓扑流式推送 (`NetMap` Stream) | 已支持 | 基于 HTTP 长连接 NDJSON 增量事件流，节点上下线、路由审批、ACL 变更毫秒级下发 |
-| **端到端安全** | 1-RTT 前向保密双向鉴权握手 | 已支持 | 类 Noise 协议（静态+临时双 X25519 ECDH + HKDF-SHA256），每次会话独立临时密钥（PFS） |
+| | 全链路 TLS 校验与按源隔离凭据 | 已支持 | 控制面与中心中继均支持证书校验 TLS（默认拒绝非回环明文连接并脱敏启动凭据）；客户端按控制端 Origin 隔离存储 `NodeToken` |
+| | 实时拓扑流式推送 (`NetMap` Stream) | 已支持 | 基于 HTTP/HTTPS 长连接 NDJSON 事件流，节点上下线、路由审批、ACL 变更毫秒级下发 |
+| **端到端安全** | 1-RTT 前向保密双向鉴权握手 | 已支持 | 类 Noise 协议（静态+临时双 X25519 ECDH + HKDF-SHA256），同一临界区单次消费待确认握手（防并发 ACK Nonce 重用） |
 | | 业务流量高速加密与防重放 | 已支持 | `AES-256-GCM`（支持 CPU AES-NI / ARMv8 硬件加速）+ 64 位滑动窗口防重放位图 |
-| | 内层源 IP 防伪造校验 | 已支持 | 解密后严格校验报文源 IP 是否属于发送方 `AllowedIPs`（防横向 IP 欺骗） |
+| | 探测/打洞控制报文 HMAC 认证与绑定 | 已支持 | 对端 `Ping`、`Pong`、`PunchCoord` 均携带每对端静态密钥派生的 128-bit HMAC-SHA256 并绑定 `probeID`，防未认证反射与路径劫持 |
+| | 出口节点源地址分离与状态化回包校验 | 已支持 | 默认路由移出 `AllowedIPs`，严禁子网路由覆盖虚拟网段；出口回包仅在已选出口且命中已建立出站流时放行 |
 | **多协议抗封锁传输** | `UDP` 原生直连 | 已支持 | 最低开销数据报通道，常规宽带与内网首选 |
 | | `QUIC v1` 混合通道 | 已支持 | 小包（<=1100B）走 RFC 9221 无队头阻塞 Datagram，大包自动走单向流保完整 MTU |
 | | `TCP` 长连接复用通道 | 已支持 | 全双工连接池帧复用，支持入站连接反向直接回包（单向出站 NAT 友好），抗 UDP 断流 |
@@ -33,11 +35,11 @@
 | | 直连高延迟劣化自动绕行最优中继 | 已支持 | 当直连延迟比最优中继（Peer 或 Center）慢超过 `10ms` 时，自动绕行更快的低延迟中继链路 |
 | | 本机换网（Wi-Fi/热点）瞬间主动漫游通告 | 已支持 | `NetMonitor` 每 `1.5s` 监测网卡变化（支持 SDK `NotifyNetworkChange` 0ms 触发），换网瞬间重置 STUN 并发起全网漫游探针 |
 | | 中心服务器单端口兜底中继 (`Center Relay`) | 已支持 | 与控制面共用同一 HTTP/TLS 端口（`Upgrade: acktier-relay`），全网严格对称 NAT 终极保底 |
-| **企业级路由与安全** | 免配置防火墙 `Subnet Router`（子网代理） | 已支持 | 纯用户态 L3->L4 TCP/UDP/ICMP NAT 网关，无需配置宿主机 `iptables` 或系统转发 |
-| | 全局出口节点 (`Exit Node`) | 已支持 | 支持宣告 `0.0.0.0/0`、`::/0`，客户端按需动态开启/切换/关闭全局出口 |
-| | 内嵌 `MagicDNS` (`100.100.100.100`) | 已支持 | 网卡层直接拦截响应 `A`、`AAAA`、`PTR` 与 `ICMP`，非组网域名自动转发上游 DNS |
-| | 零信任有状态防火墙 (`Stateful ACL`) | 已支持 | 支持 `tag:`、`group:`、主机别名、端口范围；内置 `conntrack` 放行单向访问后的回包 |
-| **多形态接入与 SDK** | 守护进程 + CLI (`acktierd` / `acktier`) | 已支持 | 支持 Windows (`wintun.dll`)、Linux (`/dev/net/tun`)、macOS (`utun`) 三端编译与运行 |
+| **企业级路由与安全** | 免配置防火墙 `Subnet Router`（子网代理） | 已支持 | 纯用户态 L3->L4 TCP/UDP/ICMP NAT 网关，严禁代拨宿主回环（`127.0.0.0/8`、`::1`）、IMDS 与宿主管理地址 |
+| | 全局出口节点 (`Exit Node`) | 已支持 | 支持宣告 `0.0.0.0/0`、`::/0`，客户端按需动态开启/切换/关闭全局出口并跟踪出站流校验回包 |
+| | 内嵌 `MagicDNS` (`100.100.100.100`) | 已支持 | 服务端分配全局唯一且不可自改的节点 DNS 名称，网卡层直接响应 `A`、`AAAA`、`PTR` 与 `ICMP` |
+| | 零信任有状态防火墙 (`Stateful ACL`) | 已支持 | 仅信任 `tag:`、`node:<id>`、`nodekey:`、`group:`、`hosts` 与 IP/CIDR（拒绝自报名称）；解析 IPv6 扩展头并默认丢弃分片/未知头；策略变更与 `down` 即时清理存量会话与 `conntrack` |
+| **多形态接入与 SDK** | 守护进程 + CLI (`acktierd` / `acktier`) | 已支持 | 支持 Windows (`wintun.dll`)、Linux (`/dev/net/tun`)、macOS (`utun`) 三端编译；LocalAPI 强制校验系统级私有权限文件（`0600` / Windows Protected DACL）Bearer 令牌 |
 | | 免特权应用内 SDK (`pkg/acknet`) | 已支持 | 对标 Tailscale `tsnet`，零权限提供标准 `Listen`、`Dial`、`ListenPacket`、`HTTPClient`、`SOCKS5` |
 | | 节点嵌入与控制 SDK (`pkg/client`) | 已支持 | 提供 `client.Node`（含状态订阅与自定义 TUN）、`DaemonClient`、`AdminClient` |
 

@@ -2,37 +2,87 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/acktier/acktier/internal/secfile"
 	"github.com/acktier/acktier/internal/server/control"
 	"github.com/acktier/acktier/internal/server/relay"
 	"github.com/acktier/acktier/internal/server/store"
 )
 
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
+}
+
+func redactSecret(s string) string {
+	if len(s) <= 10 {
+		return "[redacted]"
+	}
+	return s[:10] + "...[redacted]"
+}
+
+func defaultCredentialsPath(dataPath string) string {
+	if dataPath != "" {
+		return filepath.Join(filepath.Dir(dataPath), "server-credentials.json")
+	}
+	if cfgDir, err := os.UserConfigDir(); err == nil && cfgDir != "" {
+		return filepath.Join(cfgDir, "acktier", "server-credentials.json")
+	}
+	return "./data/server-credentials.json"
+}
+
 func main() {
 	var (
-		listenAddr  = flag.String("listen", "0.0.0.0:8080", "HTTP control & relay listen address")
-		stunAddr    = flag.String("stun", "0.0.0.0:3478", "Primary UDP STUN listen address (empty to disable)")
-		stunAltAddr = flag.String("stun-alt", "0.0.0.0:3479", "Secondary UDP STUN listen address for NAT type detection")
-		publicHost  = flag.String("public-host", "127.0.0.1", "Public host/IP advertised to clients for Relay & STUN")
-		dataPath    = flag.String("data", "./data/server-state.json", "Path to persistent server state file")
-		adminToken  = flag.String("admin-token", os.Getenv("ACKTIER_ADMIN_TOKEN"), "Admin API bearer token (auto-generated if empty)")
+		listenAddr   = flag.String("listen", "127.0.0.1:8080", "Control & relay listen address (non-loopback requires -tls-cert/-tls-key)")
+		stunAddr     = flag.String("stun", "0.0.0.0:3478", "Primary UDP STUN listen address (empty to disable)")
+		stunAltAddr  = flag.String("stun-alt", "0.0.0.0:3479", "Secondary UDP STUN listen address for NAT type detection")
+		publicHost   = flag.String("public-host", "127.0.0.1", "Public host/IP advertised to clients for Relay & STUN")
+		dataPath     = flag.String("data", "./data/server-state.json", "Path to persistent server state file")
+		adminToken   = flag.String("admin-token", os.Getenv("ACKTIER_ADMIN_TOKEN"), "Admin API bearer token (auto-generated and saved if empty)")
+		tlsCert      = flag.String("tls-cert", "", "TLS server certificate PEM file (enables HTTPS + TLS Relay)")
+		tlsKey       = flag.String("tls-key", "", "TLS server private key PEM file")
+		insecureHTTP = flag.Bool("insecure-http", false, "Allow plaintext HTTP on non-loopback interfaces (UNSAFE for production)")
+		credsFile    = flag.String("credentials-file", "", "Owner-only file path to write generated AdminToken / bootstrap PreAuthKey")
+		printCreds   = flag.Bool("print-credentials", false, "Print full generated credentials to stdout (local debugging only)")
 	)
 	flag.Parse()
 
+	useTLS := *tlsCert != "" || *tlsKey != ""
+	if useTLS && (*tlsCert == "" || *tlsKey == "") {
+		log.Fatalf("both -tls-cert and -tls-key must be provided when TLS is enabled")
+	}
+	if !useTLS && !isLoopbackListenAddr(*listenAddr) && !*insecureHTTP {
+		log.Fatalf("refusing to serve plaintext HTTP/Relay on non-loopback %s; provide -tls-cert and -tls-key (or bind 127.0.0.1, or pass -insecure-http for isolated lab testing)", *listenAddr)
+	}
+
+	generatedAdmin := false
 	if *adminToken == "" {
-		b := make([]byte, 16)
+		b := make([]byte, 24)
 		_, _ = rand.Read(b)
 		*adminToken = "adm_" + hex.EncodeToString(b)
+		generatedAdmin = true
 	}
 
 	st, err := store.NewFileStore(*dataPath)
@@ -45,6 +95,29 @@ func main() {
 		pak, err := st.CreatePreAuthKey("bootstrap-default", true, false, nil, 30*24*time.Hour)
 		if err == nil {
 			bootstrapKey = pak.Key
+		}
+	}
+
+	// Persist generated secrets to an owner-only file rather than leaking full credentials in stdout/logs.
+	var savedCredsPath string
+	if generatedAdmin || bootstrapKey != "" {
+		targetCreds := *credsFile
+		if targetCreds == "" {
+			targetCreds = defaultCredentialsPath(*dataPath)
+		}
+		payload := map[string]string{
+			"adminToken": *adminToken,
+			"updatedAt":  time.Now().UTC().Format(time.RFC3339),
+		}
+		if bootstrapKey != "" {
+			payload["bootstrapAuthKey"] = bootstrapKey
+		}
+		if raw, mErr := json.MarshalIndent(payload, "", "  "); mErr == nil {
+			if wErr := secfile.WritePrivate(targetCreds, raw); wErr == nil {
+				savedCredsPath = targetCreds
+			} else {
+				log.Printf("[security] warning: failed to write private credentials file %s: %v", targetCreds, wErr)
+			}
 		}
 	}
 
@@ -82,29 +155,55 @@ func main() {
 		RelayAddr:   advRelayAddr,
 		STUNAddr:    advSTUNAddr,
 		STUNAltAddr: advSTUNAltAddr,
+		UseTLS:      useTLS,
 	}, st)
 
 	httpSrv := &http.Server{
 		Addr:              *listenAddr,
 		Handler:           ctrl.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 16,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
 	}
 
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
 	fmt.Println("============================================================")
 	fmt.Printf(" AckTier Control & Relay Server\n")
-	fmt.Printf(" Listen HTTP/Relay : %s (advertised: %s)\n", *listenAddr, advRelayAddr)
+	fmt.Printf(" Listen %s/Relay : %s (advertised: %s, tls=%v)\n", strings.ToUpper(scheme), *listenAddr, advRelayAddr, useTLS)
 	if advSTUNAddr != "" {
-		fmt.Printf(" Listen UDP STUN   : %s / alt %s\n", advSTUNAddr, advSTUNAltAddr)
+		fmt.Printf(" Listen UDP STUN    : %s / alt %s\n", advSTUNAddr, advSTUNAltAddr)
 	}
-	fmt.Printf(" Admin Token       : %s\n", *adminToken)
-	if bootstrapKey != "" {
-		fmt.Printf(" Bootstrap AuthKey : %s\n", bootstrapKey)
+	if *printCreds {
+		fmt.Printf(" Admin Token        : %s\n", *adminToken)
+		if bootstrapKey != "" {
+			fmt.Printf(" Bootstrap AuthKey  : %s\n", bootstrapKey)
+		}
+	} else {
+		fmt.Printf(" Admin Token        : %s\n", redactSecret(*adminToken))
+		if bootstrapKey != "" {
+			fmt.Printf(" Bootstrap AuthKey  : %s\n", redactSecret(bootstrapKey))
+		}
+		if savedCredsPath != "" {
+			fmt.Printf(" Credentials File   : %s (owner-only permissions)\n", savedCredsPath)
+		}
 	}
 	fmt.Println("============================================================")
 
 	go func() {
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http server error: %v", err)
+		var serveErr error
+		if useTLS {
+			serveErr = httpSrv.ListenAndServeTLS(*tlsCert, *tlsKey)
+		} else {
+			serveErr = httpSrv.ListenAndServe()
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Fatalf("server listen error: %v", serveErr)
 		}
 	}()
 

@@ -141,6 +141,24 @@ func (h *Hub) LocalEndpoints(excludeIfName string, extraPublic []types.Endpoint)
 	return out
 }
 
+// ResetConnections closes active peer stream sessions across all drivers without closing bound listeners/sockets.
+func (h *Hub) ResetConnections() {
+	type resetter interface {
+		ResetConnections()
+	}
+	h.mu.RLock()
+	drivers := make([]Driver, 0, len(h.drivers))
+	for _, d := range h.drivers {
+		drivers = append(drivers, d)
+	}
+	h.mu.RUnlock()
+	for _, d := range drivers {
+		if r, ok := d.(resetter); ok {
+			r.ResetConnections()
+		}
+	}
+}
+
 func (h *Hub) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

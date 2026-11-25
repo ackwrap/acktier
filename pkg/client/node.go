@@ -79,6 +79,9 @@ type NodeConfig struct {
 	EnableLANDiscovery  bool
 	EnableNetMonitor    bool
 	DisableUDP          bool
+	TLSCAFile           string
+	AllowInsecureHTTP   bool
+	LocalAPIAddr        string
 	BlackholeProbeAfter time.Duration
 	BlackholeTimeout    time.Duration
 	NetMonitorInterval  time.Duration
@@ -159,13 +162,16 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 
 	hub := transport.NewHub()
 	eng, err := engine.New(engine.Options{
-		State:              stMgr,
-		TUN:                tunDev,
-		Hub:                hub,
-		HTTPClient:         cfg.HTTPClient,
-		RelayDial:          cfg.RelayDial,
-		GatewayTCPDial:     cfg.GatewayTCPDial,
-		GatewayUDPDial:     cfg.GatewayUDPDial,
+		State:               stMgr,
+		TUN:                 tunDev,
+		Hub:                 hub,
+		HTTPClient:          cfg.HTTPClient,
+		RelayDial:           cfg.RelayDial,
+		GatewayTCPDial:      cfg.GatewayTCPDial,
+		GatewayUDPDial:      cfg.GatewayUDPDial,
+		TLSCAFile:           cfg.TLSCAFile,
+		AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
+		LocalAPIAddr:        cfg.LocalAPIAddr,
 		DisableUDP:          cfg.DisableUDP,
 		EnableLANDiscovery:  cfg.EnableLANDiscovery,
 		EnablePortMap:       cfg.EnableUPnP,
@@ -285,9 +291,14 @@ func (n *Node) NotifyNetworkChange() {
 	n.eng.NotifyNetworkChange()
 }
 
-// LocalAPIHandler returns an http.Handler exposing the standard `/local/v1/*` IPC endpoints.
+// LocalAPIToken returns the owner-only bearer token required to authenticate with LocalAPIHandler.
+func (n *Node) LocalAPIToken() string {
+	return n.eng.LocalAPIToken()
+}
+
+// LocalAPIHandler returns an authenticated http.Handler exposing the `/local/v1/*` IPC endpoints.
 func (n *Node) LocalAPIHandler() http.Handler {
-	return localapi.NewServer(n.eng).Handler()
+	return localapi.NewServer(n.eng, n.eng.LocalAPIToken()).Handler()
 }
 
 // Subscribe registers an event listener for node state transitions and returns an unsubscribe function.

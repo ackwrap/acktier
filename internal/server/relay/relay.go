@@ -13,21 +13,42 @@ import (
 	"github.com/acktier/acktier/pkg/types"
 )
 
+const relayIdleReadTimeout = 90 * time.Second
+
 // AuthFunc validates whether a nodeKey and nodeToken may bind to the relay.
 type AuthFunc func(nodeKey types.PublicKey, nodeToken string) bool
 
 type clientSession struct {
-	nodeKey types.PublicKey
-	conn    net.Conn
-	sendCh  chan []byte
+	nodeKey   types.PublicKey
+	conn      net.Conn
+	sendCh    chan []byte
+	done      chan struct{}
 	closeOnce sync.Once
 }
 
 func (cs *clientSession) close() {
 	cs.closeOnce.Do(func() {
-		close(cs.sendCh)
+		close(cs.done)
 		_ = cs.conn.Close()
 	})
+}
+
+// enqueue safely delivers frame without ever closing sendCh, eliminating send-on-closed-channel races.
+func (cs *clientSession) enqueue(frame []byte) bool {
+	select {
+	case <-cs.done:
+		return false
+	default:
+	}
+	select {
+	case <-cs.done:
+		return false
+	case cs.sendCh <- frame:
+		return true
+	default:
+		// Drop under congestion rather than blocking sender
+		return false
+	}
 }
 
 // Server provides encrypted frame relaying (DERP-like fallback) and UDP STUN endpoint reflection.
@@ -53,30 +74,46 @@ func (s *Server) Stats() (connectedClients int, frames uint64, bytes uint64) {
 	return connectedClients, s.forwardedFrames.Load(), s.forwardedBytes.Load()
 }
 
-// ServeConn handles an upgraded or raw TCP stream from an acktierd client.
+// Disconnect immediately terminates any active Center Relay session for nodeKey (e.g. on node deletion or rekey).
+func (s *Server) Disconnect(nodeKey types.PublicKey) {
+	s.mu.Lock()
+	sess, ok := s.sessions[nodeKey]
+	if ok {
+		delete(s.sessions, nodeKey)
+	}
+	s.mu.Unlock()
+	if ok && sess != nil {
+		sess.close()
+	}
+}
+
+// ServeConn handles an upgraded TLS/TCP stream from an acktierd client.
 func (s *Server) ServeConn(conn net.Conn) {
-	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	bindPkt, err := protocol.ReadFrame(conn)
 	if err != nil {
 		_ = conn.Close()
 		return
 	}
 	nodeKey, token, err := protocol.DecodeRelayBind(bindPkt)
-	if err != nil || (s.auth != nil && !s.auth(nodeKey, token)) {
+	if err != nil || nodeKey.IsZero() || (s.auth != nil && !s.auth(nodeKey, token)) {
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_ = protocol.WriteFrame(conn, protocol.EncodeRelayBindAck(false, "unauthorized"))
 		_ = conn.Close()
 		return
 	}
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := protocol.WriteFrame(conn, protocol.EncodeRelayBindAck(true, "ok")); err != nil {
 		_ = conn.Close()
 		return
 	}
-	_ = conn.SetReadDeadline(time.Time{})
+	_ = conn.SetWriteDeadline(time.Time{})
 
 	sess := &clientSession{
 		nodeKey: nodeKey,
 		conn:    conn,
 		sendCh:  make(chan []byte, 256),
+		done:    make(chan struct{}),
 	}
 
 	s.mu.Lock()
@@ -95,23 +132,33 @@ func (s *Server) ServeConn(conn net.Conn) {
 		sess.close()
 	}()
 
-	// Writer goroutine
+	// Writer goroutine exits cleanly via sess.done without closing sendCh.
 	go func() {
-		for frame := range sess.sendCh {
-			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := protocol.WriteFrame(conn, frame); err != nil {
-				_ = conn.Close()
+		for {
+			select {
+			case <-sess.done:
 				return
+			case frame := <-sess.sendCh:
+				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := protocol.WriteFrame(conn, frame); err != nil {
+					sess.close()
+					return
+				}
 			}
 		}
 	}()
 
-	// Reader loop
+	// Reader loop with rolling idle deadline to prevent half-open socket exhaustion.
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(relayIdleReadTimeout))
 		frame, err := protocol.ReadFrame(conn)
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-				log.Printf("[relay] read from %s closed: %v", nodeKey.ShortString(), err)
+				select {
+				case <-sess.done:
+				default:
+					log.Printf("[relay] read from %s closed: %v", nodeKey.ShortString(), err)
+				}
 			}
 			return
 		}
@@ -124,10 +171,7 @@ func (s *Server) ServeConn(conn net.Conn) {
 			_, sender, probeID, txNano, _, err := protocol.DecodeProbePacket(frame)
 			if err == nil && sender == nodeKey {
 				pong := protocol.EncodeProbePacket(protocol.PacketPong, nodeKey, probeID, txNano, conn.RemoteAddr().String())
-				select {
-				case sess.sendCh <- pong:
-				default:
-				}
+				sess.enqueue(pong)
 			}
 		case protocol.PacketRelayForward:
 			ttl, src, dst, inner, err := protocol.DecodeRelayForward(frame)
@@ -141,18 +185,15 @@ func (s *Server) ServeConn(conn net.Conn) {
 				continue
 			}
 			outFrame := protocol.EncodeRelayForward(ttl-1, src, dst, inner)
-			select {
-			case target.sendCh <- outFrame:
+			if target.enqueue(outFrame) {
 				s.forwardedFrames.Add(1)
 				s.forwardedBytes.Add(uint64(len(outFrame)))
-			default:
-				// Drop under congestion rather than blocking sender
 			}
 		}
 	}
 }
 
-// ServeSTUNPacket processes UDP STUN-like Probe packets and reflects the caller's public IP:Port.
+// ServeSTUNLoop processes UDP STUN-like Probe packets and reflects the caller's public IP:Port.
 func ServeSTUNLoop(conn net.PacketConn) {
 	buf := make([]byte, 2048)
 	for {
@@ -160,8 +201,11 @@ func ServeSTUNLoop(conn net.PacketConn) {
 		if err != nil {
 			return
 		}
-		pType, sender, probeID, txNano, _, err := protocol.DecodeProbePacket(buf[:n])
-		if err != nil || pType != protocol.PacketPing {
+		if n > 160 {
+			continue // Reject oversized amplification attempts
+		}
+		pType, sender, probeID, txNano, obsIn, err := protocol.DecodeProbePacket(buf[:n])
+		if err != nil || pType != protocol.PacketPing || obsIn != "" || sender.IsZero() {
 			continue
 		}
 		pong := protocol.EncodeProbePacket(protocol.PacketPong, sender, probeID, txNano, raddr.String())
