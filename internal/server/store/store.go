@@ -2,10 +2,12 @@ package store
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"sort"
 	"strings"
@@ -20,6 +22,9 @@ var (
 	ErrNotFound       = errors.New("store: record not found")
 	ErrInvalidAuthKey = errors.New("store: invalid, expired, or exhausted auth key")
 	ErrNameConflict   = errors.New("store: node DNS name already assigned to another node")
+	ErrNodeAuth       = errors.New("store: valid node token required")
+	ErrKeyConflict    = errors.New("store: key is already assigned or has been retired")
+	ErrKeyRequired    = errors.New("store: recovery requires a new node key")
 )
 
 var reservedDNSLabels = map[string]bool{
@@ -40,6 +45,7 @@ type snapshot struct {
 	NextNodeID  types.NodeID                `json:"nextNodeId"`
 	Nodes       map[types.NodeID]StoredNode `json:"nodes"`
 	PreAuthKeys map[string]types.PreAuthKey `json:"preAuthKeys"`
+	RetiredKeys map[string]bool             `json:"retiredNodeKeys,omitempty"`
 	ACLPolicy   types.ACLPolicy             `json:"aclPolicy"`
 	FilterRules []types.FilterRule          `json:"filterRules,omitempty"`
 	DNS         types.DNSConfig             `json:"dns"`
@@ -59,6 +65,7 @@ func NewFileStore(path string) (*FileStore, error) {
 			NextNodeID:  1,
 			Nodes:       make(map[types.NodeID]StoredNode),
 			PreAuthKeys: make(map[string]types.PreAuthKey),
+			RetiredKeys: make(map[string]bool),
 			DNS: types.DNSConfig{
 				EnableMagicDNS: true,
 				MagicDNSSuffix: "ack.internal",
@@ -77,6 +84,9 @@ func NewFileStore(path string) (*FileStore, error) {
 		}
 		if s.data.PreAuthKeys == nil {
 			s.data.PreAuthKeys = make(map[string]types.PreAuthKey)
+		}
+		if s.data.RetiredKeys == nil {
+			s.data.RetiredKeys = make(map[string]bool)
 		}
 		if s.data.NextNodeID < 1 {
 			s.data.NextNodeID = 1
@@ -149,11 +159,7 @@ func (s *FileStore) isNameTakenLocked(name string, excludeID types.NodeID) bool 
 	return false
 }
 
-// AllocateUniqueName assigns a globally unique server-managed DNS name for nodeID.
-func (s *FileStore) AllocateUniqueName(desiredHostname string, nodeID types.NodeID) string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+func (s *FileStore) allocateUniqueNameLocked(desiredHostname string, nodeID types.NodeID) string {
 	base := SanitizeDNSLabel(desiredHostname, nodeID)
 	candidate := base
 	for suffix := 2; ; suffix++ {
@@ -186,34 +192,167 @@ func GenerateNodeToken() string {
 	return "ntok_" + randomHex(24)
 }
 
-func (s *FileStore) NextID() types.NodeID {
+// RegisterNode checks key ownership, authorizes the registration and saves the
+// new state in one transaction. An enrollment key never updates an existing node.
+func (s *FileStore) RegisterNode(req types.RegisterRequest, token string,
+	allocate func() (netip.Addr, netip.Addr, error), release func(netip.Addr),
+) (sn StoredNode, oldKey types.PublicKey, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := s.data.NextNodeID
-	s.data.NextNodeID++
-	_ = s.saveLocked()
-	return id
+	existing, exists := s.findByMachineKeyLocked(req.MachineKey)
+	if exists && !tokenMatches(existing.NodeToken, token) {
+		return sn, oldKey, ErrNodeAuth
+	}
+	if exists && existing.Node.KeyRevoked && existing.Node.NodeKey == req.NodeKey {
+		return sn, oldKey, ErrKeyRequired
+	}
+	if s.keyUnavailableLocked(req.NodeKey, existing.Node.ID) {
+		return sn, oldKey, ErrKeyConflict
+	}
+	sn = existing
+	if !exists {
+		pak, keyErr := s.findPreAuthKeyLocked(req.AuthKey)
+		if keyErr != nil {
+			return StoredNode{}, oldKey, keyErr
+		}
+		v4, v6, allocErr := allocate()
+		if allocErr != nil {
+			return StoredNode{}, oldKey, allocErr
+		}
+		id := s.data.NextNodeID
+		s.data.NextNodeID++
+		sn = StoredNode{
+			NodeToken: GenerateNodeToken(),
+			Node: types.PeerNode{
+				ID: id, Name: s.allocateUniqueNameLocked(req.Hostname, id),
+				MachineKey: req.MachineKey, IPv4: v4, IPv6: v6, Tags: pak.Tags,
+				CreatedAt: time.Now().UTC(),
+			},
+		}
+		used := pak
+		used.UsedCount++
+		s.data.PreAuthKeys[pak.ID] = used
+		defer func() {
+			if err != nil {
+				s.data.NextNodeID = id
+				s.data.PreAuthKeys[pak.ID] = pak
+				release(v4)
+			}
+		}()
+	}
+	if sn.Node.NodeKey != req.NodeKey {
+		oldKey = sn.Node.NodeKey
+	}
+	sn.Node.NodeKey = req.NodeKey
+	sn.Node.KeyRevoked = false
+	if req.Hostname != "" {
+		sn.Node.Hostname = req.Hostname
+	}
+	if req.OS != "" {
+		sn.Node.OS = req.OS
+	}
+	sn.Node.Endpoints = req.Endpoints
+	if req.AdvertisedRoutes != nil {
+		sn.Node.AdvertisedRoutes = req.AdvertisedRoutes
+	}
+	sn.Node.CanRelay = req.CanRelay
+	sn.Node.PreferredRelayID = req.PreferredRelayID
+	sn.Node.Online = true
+	sn.Node.LastSeen = time.Now().UTC()
+	err = s.saveNodeLocked(sn, oldKey)
+	return sn, oldKey, err
 }
 
-func (s *FileStore) UpsertNode(sn StoredNode) error {
+func tokenMatches(want, provided string) bool {
+	return want != "" && subtle.ConstantTimeCompare([]byte(want), []byte(provided)) == 1
+}
+
+func (s *FileStore) AuthenticateNode(key types.PublicKey, token string) (StoredNode, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.authenticateNodeLocked(key, token)
+}
+
+func (s *FileStore) authenticateNodeLocked(key types.PublicKey, token string) (StoredNode, bool) {
+	sn, ok := s.findByNodeKeyLocked(key)
+	return sn, ok && !key.IsZero() && !sn.Node.KeyRevoked && tokenMatches(sn.NodeToken, token)
+}
+
+// UpdateAuthenticatedNode authorizes against the current record under the same
+// lock as the update. A concurrent deletion or rotation cannot be rolled back.
+// The callback updates metadata only and returns whether it changed the record.
+func (s *FileStore) UpdateAuthenticatedNode(key types.PublicKey, token string, update func(*types.PeerNode) bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if sn.NodeToken == "" {
-		sn.NodeToken = GenerateNodeToken()
+	sn, ok := s.authenticateNodeLocked(key, token)
+	if !ok {
+		return ErrNodeAuth
 	}
-	base := SanitizeDNSLabel(sn.Node.Name, sn.Node.ID)
-	if s.isNameTakenLocked(base, sn.Node.ID) {
-		for suffix := 2; ; suffix++ {
-			cand := fmt.Sprintf("%s-%d", base, suffix)
-			if !s.isNameTakenLocked(cand, sn.Node.ID) {
-				base = cand
-				break
-			}
+	if !update(&sn.Node) {
+		return nil
+	}
+	return s.saveNodeLocked(sn, types.PublicKey{})
+}
+
+// RekeyNode always retires the old data-plane key. Without a replacement the
+// node stays out of topology until it registers a different key with the new token.
+func (s *FileStore) RekeyNode(id types.NodeID, machineKey, nodeKey types.PublicKey) (StoredNode, types.PublicKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sn, ok := s.data.Nodes[id]
+	if !ok {
+		return StoredNode{}, types.PublicKey{}, ErrNotFound
+	}
+	oldKey := sn.Node.NodeKey
+	if !nodeKey.IsZero() && (nodeKey == oldKey || s.keyUnavailableLocked(nodeKey, id)) {
+		return StoredNode{}, oldKey, ErrKeyConflict
+	}
+	if !machineKey.IsZero() {
+		if other, ok := s.findByMachineKeyLocked(machineKey); ok && other.Node.ID != id {
+			return StoredNode{}, oldKey, ErrKeyConflict
 		}
+		sn.Node.MachineKey = machineKey
 	}
-	sn.Node.Name = base
-	s.data.Nodes[sn.Node.ID] = sn
-	return s.saveLocked()
+	sn.Node.KeyRevoked = nodeKey.IsZero()
+	if !sn.Node.KeyRevoked {
+		sn.Node.NodeKey = nodeKey
+	}
+	sn.Node.Online = false
+	sn.Node.Links = nil
+	sn.Node.Endpoints = nil
+	sn.NodeToken = GenerateNodeToken()
+	return sn, oldKey, s.saveNodeLocked(sn, oldKey)
+}
+
+func (s *FileStore) keyUnavailableLocked(key types.PublicKey, except types.NodeID) bool {
+	if s.data.RetiredKeys[key.String()] {
+		return true
+	}
+	other, found := s.findByNodeKeyLocked(key)
+	return found && other.Node.ID != except
+}
+
+func (s *FileStore) saveNodeLocked(sn StoredNode, retire types.PublicKey) error {
+	id := sn.Node.ID
+	prev, existed := s.data.Nodes[id]
+	s.data.Nodes[id] = sn
+	retiredKey := retire.String()
+	alreadyRetired := s.data.RetiredKeys[retiredKey]
+	if !retire.IsZero() {
+		s.data.RetiredKeys[retiredKey] = true
+	}
+	if err := s.saveLocked(); err != nil {
+		if existed {
+			s.data.Nodes[id] = prev
+		} else {
+			delete(s.data.Nodes, id)
+		}
+		if !alreadyRetired && !retire.IsZero() {
+			delete(s.data.RetiredKeys, retiredKey)
+		}
+		return err
+	}
+	return nil
 }
 
 // RenameNode allows an administrator to explicitly assign a unique DNS name to an existing node.
@@ -229,13 +368,21 @@ func (s *FileStore) RenameNode(id types.NodeID, newName string) (StoredNode, err
 		return StoredNode{}, ErrNameConflict
 	}
 	sn.Node.Name = clean
-	s.data.Nodes[id] = sn
-	return sn, s.saveLocked()
+	return sn, s.saveNodeLocked(sn, types.PublicKey{})
 }
 
-func (s *FileStore) FindByMachineKey(mk types.PublicKey) (StoredNode, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *FileStore) SetApprovedRoutes(id types.NodeID, routes []netip.Prefix) (StoredNode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sn, ok := s.data.Nodes[id]
+	if !ok {
+		return StoredNode{}, ErrNotFound
+	}
+	sn.Node.ApprovedRoutes = routes
+	return sn, s.saveNodeLocked(sn, types.PublicKey{})
+}
+
+func (s *FileStore) findByMachineKeyLocked(mk types.PublicKey) (StoredNode, bool) {
 	for _, sn := range s.data.Nodes {
 		if sn.Node.MachineKey == mk {
 			return sn, true
@@ -244,9 +391,7 @@ func (s *FileStore) FindByMachineKey(mk types.PublicKey) (StoredNode, bool) {
 	return StoredNode{}, false
 }
 
-func (s *FileStore) FindByNodeKey(nk types.PublicKey) (StoredNode, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *FileStore) findByNodeKeyLocked(nk types.PublicKey) (StoredNode, bool) {
 	for _, sn := range s.data.Nodes {
 		if sn.Node.NodeKey == nk {
 			return sn, true
@@ -255,16 +400,21 @@ func (s *FileStore) FindByNodeKey(nk types.PublicKey) (StoredNode, bool) {
 	return StoredNode{}, false
 }
 
-func (s *FileStore) GetNode(id types.NodeID) (StoredNode, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sn, ok := s.data.Nodes[id]
-	return sn, ok
-}
-
 func (s *FileStore) ListNodes() []StoredNode {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.listNodesLocked()
+}
+
+// TopologySnapshot reads membership and policy together so a map cannot mix
+// nodes from before an update with ACL selectors from after it.
+func (s *FileStore) TopologySnapshot() ([]StoredNode, types.DNSConfig, []types.FilterRule, types.ACLPolicy) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.listNodesLocked(), s.data.DNS, s.data.FilterRules, s.data.ACLPolicy
+}
+
+func (s *FileStore) listNodesLocked() []StoredNode {
 	out := make([]StoredNode, 0, len(s.data.Nodes))
 	for _, sn := range s.data.Nodes {
 		out = append(out, sn)
@@ -283,7 +433,17 @@ func (s *FileStore) DeleteNode(id types.NodeID) (StoredNode, error) {
 		return StoredNode{}, ErrNotFound
 	}
 	delete(s.data.Nodes, id)
-	return sn, s.saveLocked()
+	retiredKey := sn.Node.NodeKey.String()
+	alreadyRetired := s.data.RetiredKeys[retiredKey]
+	s.data.RetiredKeys[retiredKey] = true
+	if err := s.saveLocked(); err != nil {
+		s.data.Nodes[id] = sn
+		if !alreadyRetired {
+			delete(s.data.RetiredKeys, retiredKey)
+		}
+		return StoredNode{}, err
+	}
+	return sn, nil
 }
 
 func (s *FileStore) CreatePreAuthKey(label string, reusable, ephemeral bool, tags []string, ttl time.Duration) (types.PreAuthKey, error) {
@@ -307,15 +467,13 @@ func (s *FileStore) CreatePreAuthKey(label string, reusable, ephemeral bool, tag
 	return pak, s.saveLocked()
 }
 
-func (s *FileStore) ConsumePreAuthKey(rawKey string) (types.PreAuthKey, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *FileStore) findPreAuthKeyLocked(rawKey string) (types.PreAuthKey, error) {
 	if rawKey == "" {
 		return types.PreAuthKey{}, ErrInvalidAuthKey
 	}
 	now := time.Now().UTC()
-	for id, pak := range s.data.PreAuthKeys {
-		if pak.Key != rawKey {
+	for _, pak := range s.data.PreAuthKeys {
+		if !tokenMatches(pak.Key, rawKey) {
 			continue
 		}
 		if pak.Revoked || now.After(pak.ExpiresAt) {
@@ -324,9 +482,6 @@ func (s *FileStore) ConsumePreAuthKey(rawKey string) (types.PreAuthKey, error) {
 		if !pak.Reusable && pak.UsedCount > 0 {
 			return types.PreAuthKey{}, ErrInvalidAuthKey
 		}
-		pak.UsedCount++
-		s.data.PreAuthKeys[id] = pak
-		_ = s.saveLocked()
 		return pak, nil
 	}
 	return types.PreAuthKey{}, ErrInvalidAuthKey
@@ -357,14 +512,6 @@ func (s *FileStore) RevokePreAuthKey(id string) error {
 	return s.saveLocked()
 }
 
-func (s *FileStore) GetDNSAndFilters() (types.DNSConfig, []types.FilterRule) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rules := make([]types.FilterRule, len(s.data.FilterRules))
-	copy(rules, s.data.FilterRules)
-	return s.data.DNS, rules
-}
-
 func (s *FileStore) GetACLPolicy() types.ACLPolicy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -374,13 +521,23 @@ func (s *FileStore) GetACLPolicy() types.ACLPolicy {
 func (s *FileStore) SetACLPolicy(pol types.ACLPolicy) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.data.ACLPolicy
 	s.data.ACLPolicy = pol
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.data.ACLPolicy = prev
+		return err
+	}
+	return nil
 }
 
 func (s *FileStore) SetDNSConfig(dnsCfg types.DNSConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.data.DNS
 	s.data.DNS = dnsCfg
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.data.DNS = prev
+		return err
+	}
+	return nil
 }

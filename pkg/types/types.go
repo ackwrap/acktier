@@ -101,6 +101,9 @@ func OverlapsOverlayOrSpecial(pfx netip.Prefix) bool {
 	if !pfx.IsValid() {
 		return true
 	}
+	if pfx.Addr().Is4In6() {
+		return true // Reject ambiguous mapped routes; use a native IPv4 CIDR.
+	}
 	pfx = pfx.Masked()
 	if pfx.Bits() == 0 {
 		return false
@@ -137,6 +140,7 @@ type PeerNode struct {
 	PreferredRelayID string         `json:"preferredRelayId,omitempty"`
 	Tags             []string       `json:"tags,omitempty"`
 	Online           bool           `json:"online"`
+	KeyRevoked       bool           `json:"keyRevoked,omitempty"` // Admin view: excluded from NetMaps until recovery with a new key.
 	LastSeen         time.Time      `json:"lastSeen"`
 	CreatedAt        time.Time      `json:"createdAt"`
 }
@@ -249,7 +253,8 @@ type HeartbeatRequest struct {
 
 // MapStreamEvent is streamed over NDJSON from acktier-server to acktierd.
 type MapStreamEvent struct {
-	Type   string  `json:"type"` // "netmap" | "keepalive"
-	NetMap *NetMap `json:"netMap,omitempty"`
-	SentAt int64   `json:"sentAt"`
+	Type     string  `json:"type"` // "netmap" | "keepalive"
+	NetMap   *NetMap `json:"netMap,omitempty"`
+	Revision uint64  `json:"revision,omitempty"` // current topology revision on keepalives
+	SentAt   int64   `json:"sentAt"`
 }

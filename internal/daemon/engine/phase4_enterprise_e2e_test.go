@@ -180,7 +180,7 @@ func TestPhase4MagicDNSStatefulACLSubnetRouterAndExitNode(t *testing.T) {
 
 	// =========================================================================
 	// Test B: Zero-Trust Stateful ACL Enforcement!
-	// Allow `tag:dev` -> `tag:gateway:8080` and `93.184.216.34:80` (TCP only),
+	// Allow `tag:dev` -> `tag:gateway:8080` and `autogroup:internet:80` (TCP only),
 	// BLOCK port 22 (SSH), and BLOCK unsolicited `tag:gateway` -> `tag:dev:9000`!
 	// =========================================================================
 	aclPol := types.ACLPolicy{
@@ -189,7 +189,7 @@ func TestPhase4MagicDNSStatefulACLSubnetRouterAndExitNode(t *testing.T) {
 				Action: "accept",
 				Src:    []string{"tag:dev"},
 				Proto:  "tcp",
-				Dst:    []string{"tag:gateway:8080", "93.184.216.34:80"},
+				Dst:    []string{"tag:gateway:8080", "autogroup:internet:80"},
 			},
 		},
 	}

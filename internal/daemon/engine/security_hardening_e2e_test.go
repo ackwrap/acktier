@@ -12,7 +12,6 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
-	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -31,7 +30,6 @@ import (
 	"github.com/acktier/acktier/internal/daemon/localapi"
 	"github.com/acktier/acktier/internal/daemon/pktutil"
 	"github.com/acktier/acktier/internal/daemon/state"
-	"github.com/acktier/acktier/internal/daemon/transport"
 	"github.com/acktier/acktier/internal/daemon/tun"
 	"github.com/acktier/acktier/internal/server/control"
 	"github.com/acktier/acktier/internal/server/store"
@@ -478,13 +476,19 @@ func TestSecurity_IPv6ExtHeaderACL_LiveRevocation_DownCleanup_And_VerifiedTLSRel
 		UseTLS:     true,
 	}, stSrv)
 
-	// Serve Control + Hijackable `/relay` over real TLS 1.3 on in-memory net.Pipe connections!
+	// TLS alerts and HTTP hijacking both rely on socket deadline semantics.
+	// Use in-process loopback sockets rather than an unbuffered or mock pipe.
 	serveTLS := func(activeTLS *tls.Config) func(ctx context.Context, network, addr string) (net.Conn, error) {
-		ln := newPipeListener()
-		httpSrv := &http.Server{Handler: ctrl.Handler()}
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		httpSrv := &http.Server{Handler: ctrl.Handler(), ReadHeaderTimeout: 2 * time.Second}
 		go func() { _ = httpSrv.Serve(tls.NewListener(ln, activeTLS)) }()
 		t.Cleanup(func() { _ = httpSrv.Close(); _ = ln.Close() })
-		return ln.DialContext
+		return func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp4", ln.Addr().String())
+		}
 	}
 
 	validDial := serveTLS(srvTLS)
@@ -496,7 +500,8 @@ func TestSecurity_IPv6ExtHeaderACL_LiveRevocation_DownCleanup_And_VerifiedTLSRel
 	makeHTTPSClient := func(dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
 		return &http.Client{
 			Transport: &http.Transport{
-				DialContext: dial,
+				DialContext:         dial,
+				TLSHandshakeTimeout: 2 * time.Second,
 				TLSClientConfig: &tls.Config{
 					MinVersion: tls.VersionTLS12,
 					RootCAs:    rootPool,
@@ -504,9 +509,6 @@ func TestSecurity_IPv6ExtHeaderACL_LiveRevocation_DownCleanup_And_VerifiedTLSRel
 			},
 		}
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
 
 	// 1. Verify Rogue untrusted TLS server is REJECTED by client certificate verification!
 	stRogueTest, _ := state.LoadOrCreate("")
@@ -519,9 +521,16 @@ func TestSecurity_IPv6ExtHeaderACL_LiveRevocation_DownCleanup_And_VerifiedTLSRel
 		DisableUDP: true,
 	})
 	defer engRogue.Close()
-	if _, err := engRogue.Up(ctx, engine.UpRequest{ServerURL: "https://ctrl.acktier.internal:8443", AuthKey: pak.Key, Hostname: "rogue-check"}); err == nil {
-		t.Fatalf("expected untrusted TLS certificate to be rejected on Control Plane!")
+	badCtx, stopBad := context.WithTimeout(context.Background(), 2*time.Second)
+	_, badErr := engRogue.Up(badCtx, engine.UpRequest{ServerURL: "https://ctrl.acktier.internal:8443", AuthKey: pak.Key, Hostname: "rogue-check"})
+	stopBad()
+	var untrusted x509.UnknownAuthorityError
+	if !errors.As(badErr, &untrusted) {
+		t.Fatalf("expected a certificate verification error from Control Plane, got %v", badErr)
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
 
 	// Also verify valid Control Plane + ROGUE Relay server is rejected by RelayClient TLS handshake!
 	stRelayMITM, _ := state.LoadOrCreate("")
@@ -534,7 +543,9 @@ func TestSecurity_IPv6ExtHeaderACL_LiveRevocation_DownCleanup_And_VerifiedTLSRel
 		DisableUDP: true,
 	})
 	defer engMITM.Close()
-	_, _ = engMITM.Up(ctx, engine.UpRequest{ServerURL: "https://ctrl.acktier.internal:8443", AuthKey: pak.Key, Hostname: "mitm-test"})
+	if _, err := engMITM.Up(ctx, engine.UpRequest{ServerURL: "https://ctrl.acktier.internal:8443", AuthKey: pak.Key, Hostname: "mitm-test"}); err != nil {
+		t.Fatalf("expected trusted control server to connect: %v", err)
+	}
 	time.Sleep(150 * time.Millisecond)
 	if engMITM.Status().RelayConnected {
 		t.Fatalf("CRITICAL RELAY TLS BYPASS: RelayClient connected to untrusted TLS certificate!")
@@ -643,172 +654,37 @@ func TestSecurity_IPv6ExtHeaderACL_LiveRevocation_DownCleanup_And_VerifiedTLSRel
 	default:
 	}
 
-	// Finally verify `engA.Down()` immediately tears down relay, sessions, and ignores TUN/wire traffic!
+	// Token-only rekey revokes B's existing data-plane identity. Even without
+	// a replacement key, live peers must stop authorizing it.
+	rekey, err := admin.RekeyNode(ctx, nmB.Self.ID, types.PublicKey{}, types.PublicKey{})
+	if err != nil || !rekey.Node.KeyRevoked {
+		t.Fatalf("rekey did not withdraw the old node key: %v", err)
+	}
+	aStillSeesB := func() bool {
+		for _, peer := range engA.Status().Peers {
+			if peer.ID == nmB.Self.ID {
+				return true
+			}
+		}
+		return false
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && (engB.Status().State != "WaitingForControl" || aStillSeesB()) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if aStillSeesB() {
+		t.Fatal("active peer still sees the withdrawn key")
+	}
+	if got := engB.Status(); got.State != "WaitingForControl" || got.RelayConnected {
+		t.Fatalf("revoked node remained active: state=%s relay=%t", got.State, got.RelayConnected)
+	}
+
+	// An explicit Down() also tears down the remaining session.
 	engA.Down()
 	if engA.Status().State != "Stopped" || engA.Status().RelayConnected || len(engA.Status().Peers) != 0 {
 		t.Fatalf("expected Down() to clear RelayConnected and Peers, got %+v", engA.Status())
 	}
 }
-
-// --- Test Helpers for In-Memory TLS PKI & Pipe Listener ---
-
-type pipeListener struct {
-	ch     chan net.Conn
-	closed chan struct{}
-	once   sync.Once
-}
-
-func newPipeListener() *pipeListener {
-	return &pipeListener{ch: make(chan net.Conn, 32), closed: make(chan struct{})}
-}
-
-func (l *pipeListener) Accept() (net.Conn, error) {
-	select {
-	case <-l.closed:
-		return nil, net.ErrClosed
-	case c := <-l.ch:
-		return c, nil
-	}
-}
-
-func (l *pipeListener) Close() error {
-	l.once.Do(func() { close(l.closed) })
-	return nil
-}
-
-func (l *pipeListener) Addr() net.Addr {
-	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8443}
-}
-
-func (l *pipeListener) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
-	c, s := newBufferedPipeConnPair()
-	select {
-	case <-l.closed:
-		_ = c.Close()
-		_ = s.Close()
-		return nil, net.ErrClosed
-	case l.ch <- s:
-		return c, nil
-	case <-ctx.Done():
-		_ = c.Close()
-		_ = s.Close()
-		return nil, ctx.Err()
-	}
-}
-
-type bufPipeEnd struct {
-	rx          chan []byte
-	tx          chan []byte
-	peerClosed  <-chan struct{}
-	localClosed chan struct{}
-	closeOnce   sync.Once
-	readBuf     []byte
-	deadlineMu  sync.Mutex
-	readTimer   *time.Timer
-	readTCh     <-chan time.Time
-}
-
-func newBufferedPipeConnPair() (net.Conn, net.Conn) {
-	chAB := make(chan []byte, 128)
-	chBA := make(chan []byte, 128)
-	doneA := make(chan struct{})
-	doneB := make(chan struct{})
-	a := &bufPipeEnd{rx: chBA, tx: chAB, peerClosed: doneB, localClosed: doneA}
-	b := &bufPipeEnd{rx: chAB, tx: chBA, peerClosed: doneA, localClosed: doneB}
-	return a, b
-}
-
-func (p *bufPipeEnd) Read(b []byte) (int, error) {
-	if len(p.readBuf) > 0 {
-		n := copy(b, p.readBuf)
-		p.readBuf = p.readBuf[n:]
-		return n, nil
-	}
-	p.deadlineMu.Lock()
-	tch := p.readTCh
-	p.deadlineMu.Unlock()
-
-	select {
-	case <-p.localClosed:
-		return 0, net.ErrClosed
-	case chunk := <-p.rx:
-		n := copy(b, chunk)
-		if n < len(chunk) {
-			p.readBuf = chunk[n:]
-		}
-		return n, nil
-	case <-p.peerClosed:
-		select {
-		case chunk := <-p.rx:
-			n := copy(b, chunk)
-			if n < len(chunk) {
-				p.readBuf = chunk[n:]
-			}
-			return n, nil
-		default:
-			return 0, io.EOF
-		}
-	case <-tch:
-		return 0, os.ErrDeadlineExceeded
-	}
-}
-
-func (p *bufPipeEnd) Write(b []byte) (int, error) {
-	select {
-	case <-p.localClosed:
-		return 0, net.ErrClosed
-	case <-p.peerClosed:
-		return 0, io.ErrClosedPipe
-	default:
-	}
-	cp := make([]byte, len(b))
-	copy(cp, b)
-	select {
-	case <-p.localClosed:
-		return 0, net.ErrClosed
-	case <-p.peerClosed:
-		return 0, io.ErrClosedPipe
-	case p.tx <- cp:
-		return len(b), nil
-	}
-}
-
-func (p *bufPipeEnd) Close() error {
-	p.closeOnce.Do(func() { close(p.localClosed) })
-	return nil
-}
-
-func (p *bufPipeEnd) LocalAddr() net.Addr  { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8443} }
-func (p *bufPipeEnd) RemoteAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 54000} }
-
-func (p *bufPipeEnd) SetDeadline(t time.Time) error {
-	return p.SetReadDeadline(t)
-}
-
-func (p *bufPipeEnd) SetReadDeadline(t time.Time) error {
-	p.deadlineMu.Lock()
-	defer p.deadlineMu.Unlock()
-	if p.readTimer != nil {
-		p.readTimer.Stop()
-		p.readTimer = nil
-		p.readTCh = nil
-	}
-	if !t.IsZero() {
-		d := time.Until(t)
-		if d <= 0 {
-			ch := make(chan time.Time)
-			close(ch)
-			p.readTCh = ch
-		} else {
-			tm := time.NewTimer(d)
-			p.readTimer = tm
-			p.readTCh = tm.C
-		}
-	}
-	return nil
-}
-
-func (p *bufPipeEnd) SetWriteDeadline(_ time.Time) error { return nil }
 
 func generateTestPKI(t *testing.T, dnsName string) (caPEM []byte, validServerTLS *tls.Config, rogueServerTLS *tls.Config) {
 	t.Helper()
@@ -857,6 +733,5 @@ func generateTestPKI(t *testing.T, dnsName string) (caPEM []byte, validServerTLS
 
 	caBytes, validCfg := makeCAAndLeaf()
 	_, rogueCfg := makeCAAndLeaf() // Signed by an unrelated untrusted CA!
-	_ = transport.MaxCandidatesPerPeer
 	return caBytes, validCfg, rogueCfg
 }

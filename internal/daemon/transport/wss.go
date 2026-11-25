@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/acktier/acktier/internal/securehttp"
 	"github.com/acktier/acktier/pkg/types"
 )
 
@@ -54,7 +55,7 @@ func NewWSSDriver(rawLn net.Listener, dial StreamDialFunc, onRecv PacketHandler)
 		TLSClientConfig: clientTLS,
 	}
 	wd := &WSSDriver{
-		httpClient: &http.Client{Transport: tr},
+		httpClient: securehttp.NoRedirects(&http.Client{Transport: tr}),
 		onRecv:     onRecv,
 		conns:      make(map[string]*wsPeerConn),
 		closed:     make(chan struct{}),

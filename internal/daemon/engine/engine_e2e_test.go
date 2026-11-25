@@ -12,10 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/acktier/acktier/internal/daemon/engine"
+	"github.com/acktier/acktier/internal/daemon/pktutil"
 	"github.com/acktier/acktier/internal/daemon/state"
 	"github.com/acktier/acktier/internal/daemon/tun"
 	"github.com/acktier/acktier/internal/server/control"
@@ -26,11 +29,11 @@ import (
 // --- In-memory HTTP streaming RoundTripper (zero OS sockets needed) ---
 
 type pipeResponseWriter struct {
-	header     http.Header
-	statusCh   chan int
-	pw         *io.PipeWriter
-	wroteHdr   bool
-	mu         sync.Mutex
+	header   http.Header
+	statusCh chan int
+	pw       *io.PipeWriter
+	wroteHdr bool
+	mu       sync.Mutex
 }
 
 func (w *pipeResponseWriter) Header() http.Header { return w.header }
@@ -200,6 +203,113 @@ func buildDummyIPv4Packet(src, dst netip.Addr, payload []byte) []byte {
 	copy(pkt[16:20], d4[:])
 	copy(pkt[20:], payload)
 	return pkt
+}
+
+func TestDirectUDPContinuesThroughControlOutage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, err := store.NewFileStore("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pak, err := st.CreatePreAuthKey("test", true, false, nil, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctl := control.NewServer(control.Config{}, st).Handler()
+		available, disconnect := context.WithCancel(t.Context())
+		defer disconnect()
+		var stalledStreams atomic.Int32
+		var denyHeartbeat atomic.Bool
+		httpCli := &http.Client{Transport: &memRoundTripper{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/v1/node/map/stream":
+				if available.Err() != nil {
+					stalledStreams.Add(1)
+					w.WriteHeader(http.StatusOK)
+					<-r.Context().Done()
+					return
+				}
+				ctx, cancel := context.WithCancel(r.Context())
+				defer cancel()
+				stop := context.AfterFunc(available, cancel)
+				defer stop()
+				r = r.WithContext(ctx)
+			case "/api/v1/node/heartbeat":
+				if denyHeartbeat.Load() {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				if available.Err() != nil {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+			}
+			ctl.ServeHTTP(w, r)
+		})}}
+
+		sw := newMemUDPSwitch()
+		newNode := func(name, bind string) (*engine.Engine, *tun.MemoryDevice, netip.Addr) {
+			t.Helper()
+			stMgr, err := state.LoadOrCreate("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dev := tun.NewMemoryDevice(name, tun.DefaultMTU)
+			eng, err := engine.New(engine.Options{State: stMgr, TUN: dev, UDPConn: sw.Listen(bind), HTTPClient: httpCli})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = eng.Close() })
+			nm, err := eng.Up(t.Context(), engine.UpRequest{ServerURL: "http://127.0.0.1:8080", AuthKey: pak.Key, Hostname: name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return eng, dev, nm.Self.IPv4
+		}
+		engA, tunA, ipA := newNode("alpha", "127.0.0.1:51820")
+		engB, tunB, ipB := newNode("beta", "127.0.0.1:51821")
+		synctest.Wait()
+		pingCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if got, err := engA.PingPeer(pingCtx, "beta"); err != nil || got.Via != "direct-udp" {
+			t.Fatalf("loopback direct ping: got %+v, err %v", got, err)
+		}
+
+		deliver := func(msg string) {
+			t.Helper()
+			pkt := pktutil.BuildUDPPacket(ipA, ipB, 40000, 8000, []byte(msg))
+			if err := tunA.InjectOutbound(pkt); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case got := <-tunB.ReceiveInbound():
+				if !bytes.Equal(got, pkt) {
+					t.Fatalf("wrong packet received for %q", msg)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("direct UDP did not deliver %q", msg)
+			}
+		}
+		deliver("before control outage")
+		disconnect()
+		time.Sleep(62 * time.Second)
+		synctest.Wait()
+		if got := stalledStreams.Load(); got < 4 {
+			t.Fatalf("expected both silent streams to reconnect at least once, saw %d requests", got)
+		}
+		deliver("during control outage")
+
+		// A heartbeat rejection must revoke data-plane authorization even if
+		// the map stream is still silent and the offline grace period remains.
+		denyHeartbeat.Store(true)
+		time.Sleep(15 * time.Second)
+		synctest.Wait()
+		for _, eng := range []*engine.Engine{engA, engB} {
+			if got := eng.Status(); got.State != "WaitingForControl" || len(got.Peers) != 0 {
+				t.Fatalf("explicit control rejection did not clear data plane: %+v", got)
+			}
+		}
+	})
 }
 
 func TestEndToEndDirectUDPAndRelayFallback(t *testing.T) {

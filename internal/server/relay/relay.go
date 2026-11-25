@@ -96,19 +96,12 @@ func (s *Server) ServeConn(conn net.Conn) {
 		return
 	}
 	nodeKey, token, err := protocol.DecodeRelayBind(bindPkt)
-	if err != nil || nodeKey.IsZero() || (s.auth != nil && !s.auth(nodeKey, token)) {
+	if err != nil || nodeKey.IsZero() {
 		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_ = protocol.WriteFrame(conn, protocol.EncodeRelayBindAck(false, "unauthorized"))
 		_ = conn.Close()
 		return
 	}
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if err := protocol.WriteFrame(conn, protocol.EncodeRelayBindAck(true, "ok")); err != nil {
-		_ = conn.Close()
-		return
-	}
-	_ = conn.SetWriteDeadline(time.Time{})
-
 	sess := &clientSession{
 		nodeKey: nodeKey,
 		conn:    conn,
@@ -117,11 +110,21 @@ func (s *Server) ServeConn(conn net.Conn) {
 	}
 
 	s.mu.Lock()
-	if old, exists := s.sessions[nodeKey]; exists {
-		old.close()
+	// A bind and Disconnect must agree on ordering. Revocation updates the
+	// store before disconnecting, so no already-revoked bind can attach later.
+	if s.auth != nil && !s.auth(nodeKey, token) {
+		s.mu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_ = protocol.WriteFrame(conn, protocol.EncodeRelayBindAck(false, "unauthorized"))
+		_ = conn.Close()
+		return
 	}
+	old := s.sessions[nodeKey]
 	s.sessions[nodeKey] = sess
 	s.mu.Unlock()
+	if old != nil {
+		old.close()
+	}
 
 	defer func() {
 		s.mu.Lock()
@@ -131,6 +134,11 @@ func (s *Server) ServeConn(conn net.Conn) {
 		s.mu.Unlock()
 		sess.close()
 	}()
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := protocol.WriteFrame(conn, protocol.EncodeRelayBindAck(true, "ok")); err != nil {
+		return
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
 
 	// Writer goroutine exits cleanly via sess.done without closing sendCh.
 	go func() {

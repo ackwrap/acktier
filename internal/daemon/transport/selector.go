@@ -46,14 +46,11 @@ func SanitizeCandidateEndpoint(ep types.Endpoint, allowLoopback bool) (types.End
 		return types.Endpoint{}, false
 	}
 	ip, err := netip.ParseAddr(host)
-	if err != nil {
+	if err != nil || ip.Zone() != "" {
 		return types.Endpoint{}, false
 	}
 	ip = ip.Unmap()
-	if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || types.IsOverlayAddr(ip) {
-		return types.Endpoint{}, false
-	}
-	if ip.IsLoopback() && !allowLoopback {
+	if types.IsOverlayAddr(ip) || (types.IsSpecialNonRoutableAddr(ip) && !(allowLoopback && ip.IsLoopback())) {
 		return types.Endpoint{}, false
 	}
 	return types.Endpoint{
@@ -180,6 +177,12 @@ func (s *Selector) SetAllowLoopback(allow bool) {
 	s.mu.Lock()
 	s.allowLoopback = allow
 	s.mu.Unlock()
+}
+
+func (s *Selector) SanitizeEndpoint(ep types.Endpoint) (types.Endpoint, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return SanitizeCandidateEndpoint(ep, s.allowLoopback)
 }
 
 // Reset clears all peer candidate tables and active path metrics (e.g. on `acktier down`).

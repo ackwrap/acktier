@@ -35,6 +35,7 @@ const (
 	PacketRelayBind    PacketType = 0x10
 	PacketRelayBindAck PacketType = 0x11
 	PacketRelayForward PacketType = 0x12
+	PacketMeshForward  PacketType = 0x13 // Authenticated peer hop; never used on the center relay stream.
 )
 
 var (
@@ -409,6 +410,68 @@ func DecodeRelayForward(pkt []byte) (ttl byte, src, dst types.PublicKey, inner [
 	copy(src[:], body[0:32])
 	copy(dst[:], body[32:64])
 	return flags, src, dst, body[64:], nil
+}
+
+const meshForwardHeaderSize = HeaderMinSize + 3*types.KeySize + 2*8
+
+// MeshForward carries an opaque end-to-end frame plus authenticated hop
+// metadata. Each relay verifies the incoming hop and signs a new wrapper.
+type MeshForward struct {
+	TTL                      byte
+	Previous, Source, Target types.PublicKey
+	SentAt                   int64
+	Sequence                 uint64
+	Inner                    []byte
+}
+
+func EncodeMeshForward(frame MeshForward, next types.PublicKey, sign func([]byte) ([ControlAuthTagSize]byte, error)) ([]byte, error) {
+	if len(frame.Inner) > MaxFrameSize-meshForwardHeaderSize-ControlAuthTagSize {
+		return nil, ErrFrameTooLarge
+	}
+	bodyLen := meshForwardHeaderSize + len(frame.Inner)
+	out := make([]byte, bodyLen+ControlAuthTagSize)
+	WriteHeader(out, PacketMeshForward, frame.TTL)
+	copy(out[4:36], frame.Previous[:])
+	copy(out[36:68], frame.Source[:])
+	copy(out[68:100], frame.Target[:])
+	binary.BigEndian.PutUint64(out[100:108], uint64(frame.SentAt))
+	binary.BigEndian.PutUint64(out[108:116], frame.Sequence)
+	copy(out[meshForwardHeaderSize:bodyLen], frame.Inner)
+	tag, err := sign(buildControlAuthInput(next, out[:bodyLen]))
+	if err != nil {
+		return nil, err
+	}
+	copy(out[bodyLen:], tag[:])
+	return out, nil
+}
+
+func DecodeAndVerifyMeshForward(pkt []byte, local types.PublicKey, verify func(types.PublicKey, []byte, [ControlAuthTagSize]byte) bool) (MeshForward, error) {
+	var frame MeshForward
+	pType, ttl, _, err := ParseHeader(pkt)
+	if err != nil {
+		return frame, err
+	}
+	if pType != PacketMeshForward || ttl == 0 || ttl > DefaultHopTTL ||
+		len(pkt) < meshForwardHeaderSize+HeaderMinSize+ControlAuthTagSize || len(pkt) > MaxFrameSize {
+		return frame, ErrShortPacket
+	}
+	frame.TTL = ttl
+	copy(frame.Previous[:], pkt[4:36])
+	copy(frame.Source[:], pkt[36:68])
+	copy(frame.Target[:], pkt[68:100])
+	if frame.Previous.IsZero() || frame.Source.IsZero() || frame.Target.IsZero() ||
+		(ttl == DefaultHopTTL && frame.Previous != frame.Source) {
+		return frame, ErrControlUnauth
+	}
+	end := len(pkt) - ControlAuthTagSize
+	tag := [ControlAuthTagSize]byte(pkt[end:])
+	if verify == nil || !verify(frame.Previous, buildControlAuthInput(local, pkt[:end]), tag) {
+		return frame, ErrControlUnauth
+	}
+	frame.SentAt = int64(binary.BigEndian.Uint64(pkt[100:108]))
+	frame.Sequence = binary.BigEndian.Uint64(pkt[108:116])
+	frame.Inner = pkt[meshForwardHeaderSize:end]
+	return frame, nil
 }
 
 // WriteFrame writes a length-prefixed wire packet to a stream (TCP / WebSocket / Relay).

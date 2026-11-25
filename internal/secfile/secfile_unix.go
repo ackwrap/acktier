@@ -4,6 +4,6 @@ package secfile
 
 import "os"
 
-func restrictFileOwnerOnly(path string) error {
-	return os.Chmod(path, 0o600)
+func createPrivateTemp(dir string) (*os.File, error) {
+	return os.CreateTemp(dir, ".acktier-*")
 }

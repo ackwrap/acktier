@@ -100,6 +100,8 @@ nm, err := node.Up(ctx, client.UpOptions{
 })
 ```
 
+控制端暂时失联时，节点默认保留最后确认的拓扑和 ACL 最多 4 小时。可通过 `client.NodeConfig.ControlLeaseTTL` 或 `acknet.Server.ControlLeaseTTL` 调整（`0` 使用默认值，最短 `time.Minute`）；当前会话收到 `401` / `403` 时仍会立即撤权。
+
 ### 2.2 控制本地 `acktierd` 守护进程 (`client.DaemonClient`)
 
 ```go

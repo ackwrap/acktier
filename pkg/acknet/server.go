@@ -37,9 +37,10 @@ type Server struct {
 	EnableUPnP         bool
 	EnableLANDiscovery bool
 	DisableUDP         bool
-	DisableDefaultBind bool   // Skip binding default OS sockets (for custom transport injection)
-	TLSCAFile          string // Optional PEM Root CA bundle for verifying Control & Center Relay TLS
-	AllowInsecureHTTP  bool   // Explicitly allow plaintext HTTP/Relay to non-loopback servers (lab testing only)
+	DisableDefaultBind bool          // Skip binding default OS sockets (for custom transport injection)
+	TLSCAFile          string        // Optional PEM Root CA bundle for verifying Control & Center Relay TLS
+	AllowInsecureHTTP  bool          // Explicitly allow plaintext HTTP/Relay to non-loopback servers (lab testing only)
+	ControlLeaseTTL    time.Duration // Stale NetMap grace period (0 uses client.DefaultControlLeaseTTL; minimum 1m).
 
 	// Optional transport/gateway overrides for custom environments or testing.
 	CustomUDPConn      net.PacketConn
@@ -79,6 +80,7 @@ func (s *Server) ensureNodeLocked() error {
 		DisableUDP:         s.DisableUDP,
 		TLSCAFile:          s.TLSCAFile,
 		AllowInsecureHTTP:  s.AllowInsecureHTTP,
+		ControlLeaseTTL:    s.ControlLeaseTTL,
 		CustomUDPConn:      s.CustomUDPConn,
 		HTTPClient:         s.HTTPClientOverride,
 		RelayDial:          s.RelayDial,

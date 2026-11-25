@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	ustackMSS        = 1240
+	ustackMSS        = tun.DefaultMTU - 60 // IPv6 and TCP headers.
 	maxInFlightBytes = 32 * 1024
 	retransmitTick   = 120 * time.Millisecond
 )
@@ -180,12 +180,12 @@ type udpDgram struct {
 }
 
 type ustackUDPConn struct {
-	stack      *UserspaceStack
-	port       uint16
-	rxCh       chan udpDgram
-	readDead   atomic.Int64
-	closed     chan struct{}
-	closeOnce  sync.Once
+	stack     *UserspaceStack
+	port      uint16
+	rxCh      chan udpDgram
+	readDead  atomic.Int64
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func (s *UserspaceStack) ListenUDP(port uint16) (net.PacketConn, error) {
@@ -413,20 +413,20 @@ type ustackTCPConn struct {
 	key     tcpKey
 	localIP netip.Addr
 
-	mu         sync.Mutex
-	cond       *sync.Cond
-	state      tcpState
-	sndUna     uint32
-	sndNxt     uint32
-	rcvNxt     uint32
-	unacked    []unackedSeg
-	rxBuf      bytes.Buffer
-	oooMap     map[uint32][]byte
-	peerEOF    bool
-	localFIN   bool
-	resetErr   error
-	readDead   time.Time
-	writeDead  time.Time
+	mu        sync.Mutex
+	cond      *sync.Cond
+	state     tcpState
+	sndUna    uint32
+	sndNxt    uint32
+	rcvNxt    uint32
+	unacked   []unackedSeg
+	rxBuf     bytes.Buffer
+	oooMap    map[uint32][]byte
+	peerEOF   bool
+	localFIN  bool
+	resetErr  error
+	readDead  time.Time
+	writeDead time.Time
 
 	readyCh   chan struct{}
 	readyOnce sync.Once
@@ -839,7 +839,7 @@ func (s *UserspaceStack) retransmitLoop() {
 					if now.Sub(c.unacked[i].lastSent) >= retransmitTick {
 						c.unacked[i].lastSent = now
 						ack := c.rcvNxt
-						if (c.unacked[i].flags & pktutil.TCPFlagSYN) != 0 && (c.unacked[i].flags&pktutil.TCPFlagACK) == 0 {
+						if (c.unacked[i].flags&pktutil.TCPFlagSYN) != 0 && (c.unacked[i].flags&pktutil.TCPFlagACK) == 0 {
 							ack = 0
 						}
 						rexmit = append(rexmit, pktutil.BuildTCPPacket(

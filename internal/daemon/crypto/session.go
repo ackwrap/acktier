@@ -89,6 +89,7 @@ type peerEntry struct {
 	hasCtrlKey  bool
 	lastInitTs  int64
 	lastCoordTs int64
+	meshReplay  map[int64]*replayWindow
 	pending     *pendingHandshake
 	active      *activeCipher
 	pendingPkts [][]byte
@@ -214,6 +215,39 @@ func (m *Manager) AcceptPunchCoordTimestamp(senderPub types.PublicKey, txNano in
 	}
 	pe.lastCoordTs = txNano
 	return true
+}
+
+// AcceptMeshHop is called only after the hop MAC has been validated. The
+// window accepts reordering within a timestamp bucket without allowing an
+// authenticated frame to be forwarded repeatedly.
+func (m *Manager) AcceptMeshHop(sender types.PublicKey, second int64, seq uint64) bool {
+	const maxSkew = 30 // seconds
+	now := time.Now().Unix()
+	if second < now-maxSkew || second > now+maxSkew || seq == 0 {
+		return false
+	}
+	m.mu.RLock()
+	pe := m.peers[sender]
+	m.mu.RUnlock()
+	if pe == nil {
+		return false
+	}
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+	window := pe.meshReplay[second]
+	if window == nil {
+		if pe.meshReplay == nil {
+			pe.meshReplay = make(map[int64]*replayWindow)
+		}
+		for ts := range pe.meshReplay {
+			if ts < now-maxSkew || ts > now+maxSkew {
+				delete(pe.meshReplay, ts)
+			}
+		}
+		window = &replayWindow{}
+		pe.meshReplay[second] = window
+	}
+	return window.checkAndAccept(seq)
 }
 
 // HasActiveSession reports whether an active AEAD session exists with peerPub.

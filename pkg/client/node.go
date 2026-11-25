@@ -29,6 +29,9 @@ const (
 	TUNCustom TUNMode = "custom" // Caller supplies a custom PacketDevice (e.g. Android/iOS VPN fd or acknet stack)
 )
 
+// DefaultControlLeaseTTL is how long a node keeps its last authorized NetMap while control is unreachable.
+const DefaultControlLeaseTTL = engine.DefaultControlLeaseTTL
+
 // PacketDevice allows SDK consumers to plug in a custom L3 packet interface (such as mobile VPN fds or userspace stacks).
 type PacketDevice = tun.Device
 
@@ -64,10 +67,10 @@ type NodeConfig struct {
 	StatePath string
 	Hostname  string
 
-	TUNMode      TUNMode
+	TUNMode       TUNMode
 	InterfaceName string
-	MTU          int
-	CustomTUN    PacketDevice
+	MTU           int
+	CustomTUN     PacketDevice
 
 	// Multi-protocol listen addresses (e.g. "0.0.0.0:0" to auto-bind, or "" to disable a protocol).
 	UDPListenAddr  string
@@ -85,6 +88,7 @@ type NodeConfig struct {
 	BlackholeProbeAfter time.Duration
 	BlackholeTimeout    time.Duration
 	NetMonitorInterval  time.Duration
+	ControlLeaseTTL     time.Duration // Stale NetMap grace period (0 uses DefaultControlLeaseTTL; minimum 1m).
 
 	// Optional custom dialers/transports for custom host environments or sandboxed testing.
 	CustomUDPConn  net.PacketConn
@@ -107,6 +111,7 @@ func DefaultNodeConfig(statePath string) NodeConfig {
 		EnableUPnP:         true,
 		EnableLANDiscovery: true,
 		EnableNetMonitor:   true,
+		ControlLeaseTTL:    DefaultControlLeaseTTL,
 	}
 }
 
@@ -179,6 +184,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 		BlackholeProbeAfter: cfg.BlackholeProbeAfter,
 		BlackholeTimeout:    cfg.BlackholeTimeout,
 		NetMonitorInterval:  cfg.NetMonitorInterval,
+		ControlLeaseTTL:     cfg.ControlLeaseTTL,
 	})
 	if err != nil {
 		_ = tunDev.Close()
@@ -258,9 +264,9 @@ func (n *Node) Close() error {
 	return n.eng.Close()
 }
 
-func (n *Node) Status() StatusResponse                       { return n.eng.Status() }
-func (n *Node) MeshStatus() MeshStatusReport                 { return n.eng.MeshStatus() }
-func (n *Node) NetCheck(ctx context.Context) NetCheckReport  { return n.eng.NetCheck(ctx) }
+func (n *Node) Status() StatusResponse                      { return n.eng.Status() }
+func (n *Node) MeshStatus() MeshStatusReport                { return n.eng.MeshStatus() }
+func (n *Node) NetCheck(ctx context.Context) NetCheckReport { return n.eng.NetCheck(ctx) }
 func (n *Node) Ping(ctx context.Context, peer string) (*PingResult, error) {
 	return n.eng.PingPeer(ctx, peer)
 }

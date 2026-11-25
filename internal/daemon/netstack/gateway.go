@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	tcpProxyMSS    = 1260
+	tcpProxyMSS    = 1220 // Default tunnel MTU minus IPv6 and TCP headers.
 	natFlowIdleTTL = 2 * time.Minute
 )
 

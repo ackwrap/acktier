@@ -16,6 +16,7 @@ const (
 )
 
 type flowKey struct {
+	inbound bool
 	proto   uint8
 	srcIP   netip.Addr
 	srcPort uint16
@@ -31,10 +32,9 @@ type conntrackEntry struct {
 // Engine enforces compiled NetMap ACL FilterRules with stateful return-traffic connection tracking
 // and immediate conntrack re-validation whenever policies change.
 type Engine struct {
-	mu      sync.RWMutex
-	rules   []types.FilterRule
-	ctMu    sync.Mutex
-	flows   map[flowKey]conntrackEntry
+	mu    sync.RWMutex
+	rules []types.FilterRule
+	flows map[flowKey]conntrackEntry
 
 	droppedIn  atomic.Uint64
 	droppedOut atomic.Uint64
@@ -52,46 +52,41 @@ func (f *Engine) SetRules(rules []types.FilterRule) {
 	cp := make([]types.FilterRule, len(rules))
 	copy(cp, rules)
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.rules = cp
-	f.mu.Unlock()
-
-	if len(cp) > 0 {
-		now := time.Now()
-		f.ctMu.Lock()
-		for k, entry := range f.flows {
-			if now.After(entry.expiresAt) || !evalRules(cp, entry.origPkt) {
-				delete(f.flows, k)
-			}
+	if len(cp) == 0 {
+		clear(f.flows)
+		return
+	}
+	now := time.Now()
+	for k, entry := range f.flows {
+		if now.After(entry.expiresAt) || !evalRules(cp, entry.origPkt) {
+			delete(f.flows, k)
 		}
-		f.ctMu.Unlock()
 	}
 }
 
 // Reset flushes all rules and connection-tracking state (e.g. on `acktier down`).
 func (f *Engine) Reset() {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.rules = nil
-	f.mu.Unlock()
-
-	f.ctMu.Lock()
-	f.flows = make(map[flowKey]conntrackEntry)
-	f.ctMu.Unlock()
+	clear(f.flows)
 }
 
 // AllowsTuple checks whether a 5-tuple originating packet is permitted under current ACL rules
 // (used to evict revoked Gateway NAT sessions upon live ACL updates).
 func (f *Engine) AllowsTuple(srcIP netip.Addr, srcPort uint16, dstIP netip.Addr, dstPort uint16, proto uint8) bool {
 	f.mu.RLock()
-	rules := f.rules
-	f.mu.RUnlock()
-	if len(rules) == 0 {
+	defer f.mu.RUnlock()
+	if len(f.rules) == 0 {
 		return true
 	}
 	v := uint8(4)
 	if srcIP.Is6() || dstIP.Is6() {
 		v = 6
 	}
-	return evalRules(rules, pktutil.ParsedPacket{
+	return evalRules(f.rules, pktutil.ParsedPacket{
 		Version: v,
 		Proto:   proto,
 		SrcIP:   srcIP,
@@ -111,25 +106,7 @@ func (f *Engine) Stats() (activeRules int, droppedInbound, droppedOutbound uint6
 // AllowOutbound checks whether an outbound L3 packet is well-formed, uses a supported L4 protocol,
 // is permitted by ACLs, and records reverse conntrack state.
 func (f *Engine) AllowOutbound(raw []byte) bool {
-	// Always parse first so fragmented or unsupported IPv6 extension headers default-drop!
-	pkt, err := pktutil.Parse(raw)
-	if err != nil {
-		f.droppedOut.Add(1)
-		return false
-	}
-
-	f.mu.RLock()
-	rules := f.rules
-	f.mu.RUnlock()
-	if len(rules) == 0 {
-		return true
-	}
-
-	if f.matchConntrack(pkt, false) {
-		return true
-	}
-	if evalRules(rules, pkt) {
-		f.recordReverseConntrack(pkt)
+	if f.allowPacket(raw, false) {
 		return true
 	}
 	f.droppedOut.Add(1)
@@ -139,38 +116,45 @@ func (f *Engine) AllowOutbound(raw []byte) bool {
 // AllowInbound checks whether an inbound decrypted L3 packet is well-formed, uses a supported L4 protocol,
 // and matches an established conntrack flow or an explicit accept ACL rule.
 func (f *Engine) AllowInbound(raw []byte) bool {
-	pkt, err := pktutil.Parse(raw)
-	if err != nil {
-		f.droppedIn.Add(1)
-		return false
-	}
-
-	f.mu.RLock()
-	rules := f.rules
-	f.mu.RUnlock()
-	if len(rules) == 0 {
-		return true
-	}
-
-	if f.matchConntrack(pkt, true) {
-		return true
-	}
-	if evalRules(rules, pkt) {
-		f.recordReverseConntrack(pkt)
+	if f.allowPacket(raw, true) {
 		return true
 	}
 	f.droppedIn.Add(1)
 	return false
 }
 
-func (f *Engine) matchConntrack(pkt pktutil.ParsedPacket, isInbound bool) bool {
-	key, ok := buildLookupKey(pkt, isInbound)
+func (f *Engine) allowPacket(raw []byte, inbound bool) bool {
+	// Parse even without ACLs so unsupported or fragmented packets still fail closed.
+	pkt, err := pktutil.Parse(raw)
+	if err != nil {
+		return false
+	}
+
+	// Authorization and conntrack are one transaction: packets evaluated
+	// before SetRules cannot repopulate entries after it has purged them.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.rules) == 0 {
+		return true
+	}
+
+	if f.matchConntrackLocked(pkt, inbound) {
+		return true
+	}
+	if evalRules(f.rules, pkt) {
+		f.recordReverseConntrackLocked(pkt, !inbound)
+		return true
+	}
+	return false
+}
+
+func (f *Engine) matchConntrackLocked(pkt pktutil.ParsedPacket, inbound bool) bool {
+	key, ok := buildLookupKey(pkt)
 	if !ok {
 		return false
 	}
+	key.inbound = inbound
 	now := time.Now()
-	f.ctMu.Lock()
-	defer f.ctMu.Unlock()
 	entry, exists := f.flows[key]
 	if !exists {
 		return false
@@ -184,16 +168,15 @@ func (f *Engine) matchConntrack(pkt pktutil.ParsedPacket, isInbound bool) bool {
 	return true
 }
 
-func (f *Engine) recordReverseConntrack(pkt pktutil.ParsedPacket) {
+func (f *Engine) recordReverseConntrackLocked(pkt pktutil.ParsedPacket, inbound bool) {
 	revKey, ok := buildReverseKey(pkt)
 	if !ok {
 		return
 	}
+	revKey.inbound = inbound
 	origMeta := pkt
 	origMeta.Payload = nil // Do not retain packet payload buffer in conntrack!
 	now := time.Now()
-	f.ctMu.Lock()
-	defer f.ctMu.Unlock()
 	if len(f.flows) >= maxConntrackEntries {
 		for k, entry := range f.flows {
 			if now.After(entry.expiresAt) || len(f.flows) >= maxConntrackEntries {
@@ -232,7 +215,7 @@ func buildReverseKey(pkt pktutil.ParsedPacket) (flowKey, bool) {
 	return flowKey{}, false
 }
 
-func buildLookupKey(pkt pktutil.ParsedPacket, _ bool) (flowKey, bool) {
+func buildLookupKey(pkt pktutil.ParsedPacket) (flowKey, bool) {
 	switch pkt.Proto {
 	case pktutil.ProtoTCP, pktutil.ProtoUDP:
 		return flowKey{

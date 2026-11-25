@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 )
 
-// WritePrivate atomically writes secret data to path with strict owner-only OS permissions
-// (0600 on Unix/macOS; Protected DACL restricted to SYSTEM, Administrators, and current user SID on Windows).
+// WritePrivate replaces a secret file using a temporary file that is private
+// from creation. The parent directory must be controlled by the caller.
 func WritePrivate(path string, data []byte) error {
 	if path == "" {
 		return fmt.Errorf("secfile: empty path")
@@ -16,28 +16,29 @@ func WritePrivate(path string, data []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := createPrivateTemp(dir)
 	if err != nil {
 		return err
 	}
-	_, wErr := f.Write(data)
-	cErr := f.Close()
-	if wErr != nil {
-		_ = os.Remove(tmp)
-		return wErr
+	tmp := f.Name()
+	defer func() {
+		_ = f.Close()
+		if tmp != "" {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		return err
 	}
-	if cErr != nil {
-		_ = os.Remove(tmp)
-		return cErr
+	if err := f.Sync(); err != nil {
+		return err
 	}
-	if err := restrictFileOwnerOnly(tmp); err != nil {
-		_ = os.Remove(tmp)
+	if err := f.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
-	return restrictFileOwnerOnly(path)
+	tmp = ""
+	return nil
 }

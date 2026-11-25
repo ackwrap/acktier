@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/acktier/acktier/internal/securehttp"
 	"github.com/acktier/acktier/pkg/types"
 )
 
@@ -42,7 +43,7 @@ func NewAdminClient(serverURL, adminToken string, httpCli *http.Client) *AdminCl
 	return &AdminClient{
 		serverURL:  strings.TrimRight(strings.TrimSpace(serverURL), "/"),
 		adminToken: strings.TrimSpace(adminToken),
-		httpClient: httpCli,
+		httpClient: securehttp.NoRedirects(httpCli),
 		customHTTP: custom,
 	}
 }
@@ -61,7 +62,7 @@ func (a *AdminClient) ConfigureTLS(caFile string, allowInsecureHTTP bool) error 
 	if !pool.AppendCertsFromPEM(pemBytes) {
 		return fmt.Errorf("TLS CA file %s contains no valid PEM certificates", caFile)
 	}
-	a.httpClient = &http.Client{
+	a.httpClient = securehttp.NoRedirects(&http.Client{
 		Timeout: 15 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
@@ -69,7 +70,7 @@ func (a *AdminClient) ConfigureTLS(caFile string, allowInsecureHTTP bool) error 
 				RootCAs:    pool,
 			},
 		},
-	}
+	})
 	return nil
 }
 
@@ -123,7 +124,9 @@ type RekeyNodeResponse struct {
 	Node      types.PeerNode `json:"node"`
 }
 
-// RekeyNode rotates a registered node's NodeToken (and optionally updates its MachineKey/NodeKey) for admin-approved recovery.
+// RekeyNode rotates the bearer token and retires the previous data-plane key.
+// Without a replacement NodeKey, the node is excluded from topology until it
+// registers a different key using the new token.
 func (a *AdminClient) RekeyNode(ctx context.Context, nodeID types.NodeID, newMachineKey, newNodeKey types.PublicKey) (*RekeyNodeResponse, error) {
 	body := map[string]any{}
 	if !newMachineKey.IsZero() {

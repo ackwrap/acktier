@@ -35,6 +35,7 @@ import (
 	"github.com/acktier/acktier/internal/daemon/state"
 	"github.com/acktier/acktier/internal/daemon/transport"
 	"github.com/acktier/acktier/internal/daemon/tun"
+	"github.com/acktier/acktier/internal/securehttp"
 	"github.com/acktier/acktier/pkg/protocol"
 	"github.com/acktier/acktier/pkg/types"
 )
@@ -73,6 +74,7 @@ type Options struct {
 	BlackholeProbeAfter time.Duration           // Active-tx unanswered duration before fast probe (default 2.5s)
 	BlackholeTimeout    time.Duration           // Active-tx unanswered duration before declaring direct path dead (default 4.5s)
 	NetMonitorInterval  time.Duration           // Interface change poll interval (default 1.5s)
+	ControlLeaseTTL     time.Duration           // Stale NetMap grace period (0 uses the default; minimum 1m)
 }
 
 type peerRuntime struct {
@@ -380,10 +382,15 @@ type Engine struct {
 	enablePortMap      bool
 	enableNetMonitor   bool
 	netMonInterval     time.Duration
+	controlLeaseTTL    time.Duration
 
+	sessionMu          sync.Mutex // Serializes session changes and NetMap installation.
+	sessionEpoch       uint64
+	controlCtx         context.Context
 	mu                 sync.RWMutex
 	running            bool
 	runCancel          context.CancelFunc
+	controlUntil       time.Time
 	activeControlHost  string
 	netMap             types.NetMap
 	peersByKey         map[types.PublicKey]*peerRuntime
@@ -395,6 +402,7 @@ type Engine struct {
 	hbTriggerCh       chan struct{}
 	peerRelayedFrames atomic.Uint64
 	peerRelayedBytes  atomic.Uint64
+	meshSeq           atomic.Uint64
 	rlMu              sync.Mutex
 	rlTokens          float64
 	rlLastRefill      time.Time
@@ -443,6 +451,13 @@ func New(opts Options) (*Engine, error) {
 	if opts.State == nil || opts.TUN == nil {
 		return nil, errors.New("engine: State and TUN are required")
 	}
+	leaseTTL := opts.ControlLeaseTTL
+	if leaseTTL == 0 {
+		leaseTTL = DefaultControlLeaseTTL
+	}
+	if leaseTTL < controlStreamIdleTimeout {
+		return nil, fmt.Errorf("engine: control lease TTL must be at least %s (0 uses the default)", controlStreamIdleTimeout)
+	}
 	rootPool, err := loadCertPool(opts.TLSCAFile)
 	if err != nil {
 		return nil, err
@@ -454,6 +469,10 @@ func New(opts Options) (*Engine, error) {
 	if httpCli == nil {
 		httpCli = &http.Client{
 			Transport: &http.Transport{
+				DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 15 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
 				TLSClientConfig: &tls.Config{
 					MinVersion: tls.VersionTLS12,
 					RootCAs:    rootPool,
@@ -473,7 +492,7 @@ func New(opts Options) (*Engine, error) {
 		pktFilter:          filter.New(),
 		dnsResolver:        dns.NewResolver(),
 		exitFlows:          newExitFlowTracker(),
-		httpClient:         httpCli,
+		httpClient:         securehttp.NoRedirects(httpCli),
 		customHTTP:         customHTTP,
 		customRelayDial:    opts.RelayDial != nil,
 		rootCAs:            rootPool,
@@ -485,6 +504,7 @@ func New(opts Options) (*Engine, error) {
 		enablePortMap:      opts.EnablePortMap,
 		enableNetMonitor:   opts.EnableNetMonitor,
 		netMonInterval:     opts.NetMonitorInterval,
+		controlLeaseTTL:    leaseTTL,
 		peersByKey:         make(map[types.PublicKey]*peerRuntime),
 		peersByIP:          make(map[netip.Addr]*peerRuntime),
 		hbTriggerCh:        make(chan struct{}, 1),
@@ -518,9 +538,8 @@ func (e *Engine) LocalAPIToken() string {
 
 func (e *Engine) isRunning() bool {
 	e.mu.RLock()
-	r := e.running
-	e.mu.RUnlock()
-	return r
+	defer e.mu.RUnlock()
+	return e.running && time.Now().Before(e.controlUntil)
 }
 
 func (e *Engine) isHostManagementOrLocalIP(dstIP netip.Addr) bool {
@@ -577,6 +596,10 @@ func validateControlServerURL(rawURL string, requireTLS bool) (*url.URL, bool, e
 
 // Up authenticates with acktier-server, configures the virtual NIC, and starts background topology, NAT, & mesh loops.
 func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
+	e.sessionMu.Lock()
+	e.sessionEpoch++
+	epoch := e.sessionEpoch
+	e.sessionMu.Unlock()
 	cur := e.stateMgr.Get()
 	serverURL := strings.TrimRight(strings.TrimSpace(req.ServerURL), "/")
 	if serverURL == "" {
@@ -628,7 +651,8 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 		s.CanRelay = (relayMode == types.RelayModeOn)
 	})
 
-	// Allow loopback candidate endpoints ONLY when running a local loopback smoke setup.
+	// A loopback control URL alone may be a local proxy for a remote control
+	// server. Require an explicitly loopback-bound peer transport as well.
 	hasLoopTransport := false
 	for _, proto := range []types.TransportProto{types.ProtoUDP, types.ProtoTCP, types.ProtoQUIC, types.ProtoWSS} {
 		if drv := e.hub.Driver(proto); drv != nil && isLoopbackHostPort(drv.LocalAddr()) {
@@ -636,8 +660,6 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 			break
 		}
 	}
-	e.selector.SetAllowLoopback(isLoopbackCtrl || hasLoopTransport)
-
 	endpoints := e.collectLocalEndpoints()
 	canRelay := e.effectiveCanRelay()
 	regReq := types.RegisterRequest{
@@ -679,9 +701,26 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4*1024*1024)).Decode(&regResp); err != nil {
 		return nil, fmt.Errorf("decode register response: %w", err)
 	}
+	if regResp.NodeToken == "" || !e.isOwnNetMap(regResp.NetMap) {
+		return nil, errors.New("control server did not authorize this node")
+	}
+
+	e.sessionMu.Lock()
+	defer e.sessionMu.Unlock()
+	if epoch != e.sessionEpoch {
+		return nil, errors.New("node registration superseded by another session change")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-e.closedCh:
+		return nil, net.ErrClosed
+	default:
+	}
 
 	normOrigin := state.NormalizeServerOrigin(serverURL)
-	_ = e.stateMgr.Update(func(s *state.ConfigState) {
+	if err := e.stateMgr.Update(func(s *state.ConfigState) {
 		s.ServerURL = serverURL
 		if normOrigin != "" && regResp.NodeToken != "" {
 			s.NodeTokens[normOrigin] = regResp.NodeToken
@@ -699,18 +738,22 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 		s.MaxRelayMbps = maxMbps
 		s.CanRelay = canRelay
 		s.WantRunning = true
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("persist node registration: %w", err)
+	}
 
-	e.Down()
+	e.stopSessionLocked()
+	e.selector.SetAllowLoopback(isLoopbackCtrl && hasLoopTransport)
 
 	runCtx, cancel := context.WithCancel(context.Background())
+	e.controlCtx = runCtx
 	e.mu.Lock()
 	e.running = true
 	e.runCancel = cancel
 	e.activeControlHost = parsedURL.Hostname()
 	e.mu.Unlock()
 
-	e.applyNetMap(regResp.NetMap)
+	e.applyNetMap(regResp.NetMap, true)
 
 	if len(regResp.NetMap.Relays) > 0 {
 		r0 := regResp.NetMap.Relays[0]
@@ -746,6 +789,7 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 		go nmMon.Run(runCtx)
 	}
 	go e.mapStreamLoop(runCtx, serverURL, regResp.NodeToken)
+	go e.watchControlLease(runCtx)
 	go e.maintenanceLoop(runCtx, serverURL, regResp.NodeToken)
 
 	return &regResp.NetMap, nil
@@ -754,39 +798,41 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 // Down disconnects control stream, Center Relay, AND immediately tears down all E2EE sessions,
 // direct peer stream connections, routing state, conntrack entries, and Gateway proxy flows!
 func (e *Engine) Down() {
+	e.sessionMu.Lock()
+	defer e.sessionMu.Unlock()
+	e.sessionEpoch++
+	e.stopSessionLocked()
+	_ = e.stateMgr.Update(func(s *state.ConfigState) {
+		s.WantRunning = false
+	})
+}
+
+func (e *Engine) stopSessionLocked() {
+	e.controlCtx = nil
 	e.mu.Lock()
 	cancel := e.runCancel
 	e.runCancel = nil
 	e.running = false
-	e.peersByKey = make(map[types.PublicKey]*peerRuntime)
-	e.peersByIP = make(map[netip.Addr]*peerRuntime)
-	e.routeTable = nil
-	e.exitNodePeer = nil
-	e.selfApprovedRoutes = nil
-	e.netMap = types.NetMap{}
+	e.activeControlHost = ""
 	e.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
 	e.relayCli.CloseCurrent()
-	e.cryptoMgr.ResetSessions()
-	e.selector.Reset()
-	e.hub.ResetConnections()
-	e.pktFilter.Reset()
-	e.gateway.ResetFlows()
-	e.exitFlows.Reset()
-	e.meshRouter.Recompute(nil, nil)
-
-	_ = e.stateMgr.Update(func(s *state.ConfigState) {
-		s.WantRunning = false
-	})
+	e.clearAuthorizationLocked()
 }
 
 func (e *Engine) Close() error {
-	e.Down()
+	e.sessionMu.Lock()
+	defer e.sessionMu.Unlock()
 	e.closeOnce.Do(func() {
 		close(e.closedCh)
+		e.sessionEpoch++
+		e.stopSessionLocked()
+		_ = e.stateMgr.Update(func(s *state.ConfigState) {
+			s.WantRunning = false
+		})
 		_ = e.gateway.Close()
 		_ = e.hub.Close()
 		_ = e.tunDev.Close()
@@ -796,6 +842,8 @@ func (e *Engine) Close() error {
 
 // SetExitNode dynamically switches or clears ("none" / "") the client's active global Exit Node.
 func (e *Engine) SetExitNode(target string) error {
+	e.sessionMu.Lock()
+	defer e.sessionMu.Unlock()
 	target = strings.TrimSpace(target)
 	if strings.EqualFold(target, "none") || strings.EqualFold(target, "off") {
 		target = ""
@@ -808,8 +856,8 @@ func (e *Engine) SetExitNode(target string) error {
 	e.mu.RLock()
 	nm := e.netMap
 	e.mu.RUnlock()
-	if nm.Self.ID != 0 {
-		e.applyNetMap(nm)
+	if nm.Self.ID != 0 && e.isRunning() {
+		e.applyNetMap(nm, false)
 	}
 	if target != "" {
 		e.mu.RLock()
@@ -840,16 +888,15 @@ func (e *Engine) LookupDNS(name string) (ipv4, ipv6 string, fqdn string, ok bool
 // NotifyNetworkChange immediately refreshes STUN/port-mappings, pushes a new Heartbeat to Control,
 // and actively sends roaming probes to all online peers when the host switches Wi-Fi / cellular networks.
 func (e *Engine) NotifyNetworkChange() {
+	if !e.isRunning() {
+		return
+	}
 	e.mu.RLock()
-	running := e.running
 	peers := make([]*peerRuntime, 0, len(e.peersByKey))
 	for _, pr := range e.peersByKey {
 		peers = append(peers, pr)
 	}
 	e.mu.RUnlock()
-	if !running {
-		return
-	}
 
 	e.natDetector.ResetObservations()
 	e.selector.OnLocalNetworkChange()
@@ -882,6 +929,7 @@ func (e *Engine) Status() StatusResponse {
 
 	e.mu.RLock()
 	running := e.running
+	authorized := running && time.Now().Before(e.controlUntil)
 	nm := e.netMap
 	peers := make([]PeerStatus, 0, len(nm.Peers))
 	for _, p := range nm.Peers {
@@ -939,8 +987,10 @@ func (e *Engine) Status() StatusResponse {
 	e.mu.RUnlock()
 
 	stateStr := "Stopped"
-	if running {
+	if authorized {
 		stateStr = "Running"
+	} else if running {
+		stateStr = "WaitingForControl"
 	}
 	gwPkts, _ := e.gateway.Stats()
 	aclRules, aclDropIn, aclDropOut := e.pktFilter.Stats()
@@ -958,7 +1008,7 @@ func (e *Engine) Status() StatusResponse {
 		RelayMode:          relayMode,
 		CanRelay:           e.effectiveCanRelay(),
 		MaxRelayMbps:       st.MaxRelayMbps,
-		RelayConnected:     e.relayCli.Connected(),
+		RelayConnected:     authorized && e.relayCli.Connected(),
 		CenterRelayRTTMs:   e.relayCli.RTTMillis(),
 		PeerRelayedFrames:  e.peerRelayedFrames.Load(),
 		PeerRelayedBytes:   e.peerRelayedBytes.Load(),
@@ -1108,7 +1158,7 @@ func (e *Engine) PingPeer(ctx context.Context, target string) (*PingResult, erro
 		if ep.Proto == types.ProtoUDP {
 			if !e.disableUDP && e.hub.HasProto(types.ProtoUDP) {
 				e.selector.RecordProbeSent(peerKey, ep, probeID)
-				_ = e.hub.Send(ctx, ep, pkt)
+				_ = e.sendPeerPacket(ctx, ep, pkt)
 			}
 			continue
 		}
@@ -1117,7 +1167,7 @@ func (e *Engine) PingPeer(ctx context.Context, target string) (*PingResult, erro
 			go func(targetEp types.Endpoint) {
 				sCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 				defer cancel()
-				_ = e.hub.Send(sCtx, targetEp, pkt)
+				_ = e.sendPeerPacket(sCtx, targetEp, pkt)
 			}(ep)
 		}
 	}
@@ -1177,7 +1227,9 @@ func (e *Engine) resolvePeer(target string) (*peerRuntime, error) {
 	return nil, fmt.Errorf("peer %q not found in NetMap", target)
 }
 
-func (e *Engine) applyNetMap(nm types.NetMap) {
+// applyNetMap is called under sessionMu.
+func (e *Engine) applyNetMap(nm types.NetMap, refreshLease bool) {
+	nm.Peers = activeMapPeers(nm.Peers)
 	authKeys := make([]types.PublicKey, 0, len(nm.Peers))
 	for _, p := range nm.Peers {
 		authKeys = append(authKeys, p.NodeKey)
@@ -1258,6 +1310,9 @@ func (e *Engine) applyNetMap(nm types.NetMap) {
 	e.routeTable = newRoutes
 	e.exitNodePeer = selectedExit
 	e.selfApprovedRoutes = append([]netip.Prefix(nil), nm.Self.ApprovedRoutes...)
+	if refreshLease {
+		e.controlUntil = time.Now().Add(e.controlLeaseTTL)
+	}
 	e.mu.Unlock()
 
 	if selectedExit != nil {
@@ -1399,10 +1454,10 @@ func (e *Engine) isSelfApprovedDestination(dst netip.Addr) bool {
 }
 
 // validateInboundPeerSource strictly separates destination routing from source-IP authorization:
-// 1. Overlay IPs (100.64.0.0/10, fd7a:115c:a1e0::/48) are ONLY valid if they equal `pr`'s own assigned IPv4/IPv6.
-// 2. Non-overlay subnet IPs are valid ONLY if covered by a non-default, non-overlay ApprovedRoute of `pr`.
-// 3. External Internet source IPs via Exit Node are valid ONLY if `pr` is our actively selected Exit Node
-//    AND the packet matches an established outbound flow tracked in `e.exitFlows`!
+//  1. Overlay IPs (100.64.0.0/10, fd7a:115c:a1e0::/48) are ONLY valid if they equal `pr`'s own assigned IPv4/IPv6.
+//  2. Non-overlay subnet IPs are valid ONLY if covered by a non-default, non-overlay ApprovedRoute of `pr`.
+//  3. External Internet source IPs via Exit Node are valid ONLY if `pr` is our actively selected Exit Node
+//     AND the packet matches an established outbound flow tracked in `e.exitFlows`!
 func (e *Engine) validateInboundPeerSource(pr *peerRuntime, plainIP []byte) (pktutil.ParsedPacket, bool) {
 	var zero pktutil.ParsedPacket
 	if pr == nil {
@@ -1566,7 +1621,8 @@ func (e *Engine) handleCenterRelayedPacket(src types.PublicKey, inner []byte) {
 // onAuthenticatedInboundDirectRx refreshes LastRx if srcEp is ALREADY round-trip verified;
 // otherwise it dispatches an immediate bound Ping probe so dynamic NAT pinholes verify in 1 RTT without trusting spoofed source IPs!
 func (e *Engine) onAuthenticatedInboundDirectRx(pr *peerRuntime, peerKey types.PublicKey, srcEp types.Endpoint) {
-	if srcEp.Addr == "" || pr == nil {
+	srcEp, ok := e.selector.SanitizeEndpoint(srcEp)
+	if !ok || pr == nil {
 		return
 	}
 	if e.selector.RefreshVerifiedRx(peerKey, srcEp) {
@@ -1584,7 +1640,7 @@ func (e *Engine) onAuthenticatedInboundDirectRx(pr *peerRuntime, peerKey types.P
 			probeID := cryptoRandUint64()
 			e.selector.RecordProbeSent(peerKey, srcEp, probeID)
 			if probe, err := e.buildAuthProbe(protocol.PacketPing, peerKey, probeID, time.Now().UnixNano(), ""); err == nil {
-				_ = e.hub.Send(context.Background(), srcEp, probe)
+				_ = e.sendPeerPacket(context.Background(), srcEp, probe)
 			}
 		}
 		go e.probePeerCalibrationBurst(peerKey, []types.Endpoint{srcEp})
@@ -1617,41 +1673,41 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 	}
 
 	switch pType {
-	case protocol.PacketRelayForward:
+	case protocol.PacketMeshForward:
 		if srcMode != sourceDirect {
 			return
 		}
-		ttl, origSrc, finalDst, inner, err := protocol.DecodeRelayForward(pkt)
+		localPub := e.cryptoMgr.LocalPublicKey()
+		frame, err := protocol.DecodeAndVerifyMeshForward(pkt, localPub, e.cryptoMgr.VerifyControl)
 		if err != nil {
 			return
 		}
-		// Refresh return NAT mapping ONLY if srcEp is already verified (or challenge via authenticated Ping)!
-		if ttl == protocol.DefaultHopTTL && srcEp.Addr != "" {
-			if prOrig := e.getPeerRuntime(origSrc); prOrig != nil {
-				e.onAuthenticatedInboundDirectRx(prOrig, origSrc, srcEp)
-			}
-		}
-		localPub := e.cryptoMgr.LocalPublicKey()
-		if finalDst == localPub {
-			e.handleIncomingWirePacket(inner, types.Endpoint{}, sourcePeerRelay, origSrc)
+		hop := e.getPeerRuntime(frame.Previous)
+		if hop == nil || e.getPeerRuntime(frame.Source) == nil ||
+			!e.cryptoMgr.AcceptMeshHop(frame.Previous, frame.SentAt, frame.Sequence) {
 			return
 		}
-		if ttl <= 1 || !e.effectiveCanRelay() {
+		e.onAuthenticatedInboundDirectRx(hop, frame.Previous, srcEp)
+		if frame.Target == localPub {
+			e.handleIncomingWirePacket(frame.Inner, types.Endpoint{}, sourcePeerRelay, frame.Source)
 			return
 		}
-		if e.getPeerRuntime(origSrc) == nil || e.getPeerRuntime(finalDst) == nil {
+		if frame.TTL <= 1 || !e.effectiveCanRelay() || e.getPeerRuntime(frame.Target) == nil {
 			return
 		}
 		if !e.allowRelayBandwidth(len(pkt)) {
 			return
 		}
-		fwdFrame := protocol.EncodeRelayForward(ttl-1, origSrc, finalDst, inner)
-		if e.forwardMeshRelayFrame(origSrc, finalDst, fwdFrame) {
+		frame.TTL--
+		if e.forwardMeshRelayFrame(frame) {
 			e.peerRelayedFrames.Add(1)
-			e.peerRelayedBytes.Add(uint64(len(fwdFrame)))
+			e.peerRelayedBytes.Add(uint64(len(pkt)))
 		}
 
 	case protocol.PacketHandshakeInit:
+		if srcMode != sourceDirect && !handshakeMatchesRelay(pkt, relaySrc) {
+			return
+		}
 		peerKey, ackPkt, queued, err := e.cryptoMgr.HandleHandshakeInit(pkt)
 		if err != nil {
 			return
@@ -1661,7 +1717,7 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 			return
 		}
 		if srcMode == sourceDirect && srcEp.Addr != "" {
-			_ = e.hub.Send(context.Background(), srcEp, ackPkt)
+			_ = e.sendPeerPacket(context.Background(), srcEp, ackPkt)
 			e.onAuthenticatedInboundDirectRx(pr, peerKey, srcEp)
 		} else {
 			if srcMode == sourcePeerRelay {
@@ -1674,6 +1730,9 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 		e.flushQueuedPackets(pr, peerKey, queued)
 
 	case protocol.PacketHandshakeAck:
+		if srcMode != sourceDirect && !handshakeMatchesRelay(pkt, relaySrc) {
+			return
+		}
 		peerKey, queued, err := e.cryptoMgr.HandleHandshakeAck(pkt)
 		if err != nil {
 			return
@@ -1696,7 +1755,7 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 
 	case protocol.PacketData:
 		peerKey, plainIP, err := e.cryptoMgr.OpenPacket(pkt)
-		if err != nil {
+		if err != nil || (srcMode != sourceDirect && relaySrc != peerKey) {
 			return
 		}
 		pr := e.getPeerRuntime(peerKey)
@@ -1799,7 +1858,7 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 			return
 		}
 		if srcMode == sourceDirect && srcEp.Addr != "" {
-			_ = e.hub.Send(context.Background(), srcEp, pong)
+			_ = e.sendPeerPacket(context.Background(), srcEp, pong)
 		} else if !relaySrc.IsZero() {
 			e.sendReplyOverMeshOrRelay(sender, pong, srcMode)
 		}
@@ -1905,24 +1964,38 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 	}
 }
 
-func (e *Engine) forwardMeshRelayFrame(origSrc, finalDst types.PublicKey, fwdFrame []byte) bool {
-	if bestEp, _, ok := e.selector.BestEndpoint(finalDst); ok {
-		if !(e.disableUDP && bestEp.Proto == types.ProtoUDP) {
-			if e.hub.Send(context.Background(), bestEp, fwdFrame) == nil {
-				return true
-			}
+func handshakeMatchesRelay(pkt []byte, relaySrc types.PublicKey) bool {
+	_, sender, _, _, _, err := protocol.DecodeHandshakePacket(pkt)
+	return err == nil && sender == relaySrc
+}
+
+func (e *Engine) forwardMeshRelayFrame(frame protocol.MeshForward) bool {
+	if frame.Target != frame.Previous && frame.Target != frame.Source {
+		if e.sendMeshHop(frame.Target, frame) == nil {
+			return true
 		}
 	}
-	if rt, ok := e.meshRouter.Lookup(finalDst); ok && rt.NextHop != origSrc {
-		if nextEp, _, ok2 := e.selector.BestEndpoint(rt.NextHop); ok2 {
-			if !(e.disableUDP && nextEp.Proto == types.ProtoUDP) {
-				if e.hub.Send(context.Background(), nextEp, fwdFrame) == nil {
-					return true
-				}
-			}
-		}
+	if rt, ok := e.meshRouter.Lookup(frame.Target); ok && rt.NextHop != frame.Source && rt.NextHop != frame.Previous {
+		return e.sendMeshHop(rt.NextHop, frame) == nil
 	}
 	return false
+}
+
+func (e *Engine) sendMeshHop(next types.PublicKey, frame protocol.MeshForward) error {
+	ep, _, ok := e.selector.BestEndpoint(next)
+	if !ok {
+		return errors.New("next-hop direct endpoint unavailable")
+	}
+	frame.Previous = e.cryptoMgr.LocalPublicKey()
+	frame.SentAt = time.Now().Unix()
+	frame.Sequence = e.meshSeq.Add(1)
+	signed, err := protocol.EncodeMeshForward(frame, next, func(pkt []byte) ([protocol.ControlAuthTagSize]byte, error) {
+		return e.cryptoMgr.SignControl(next, pkt)
+	})
+	if err != nil {
+		return err
+	}
+	return e.sendPeerPacket(context.Background(), ep, signed)
 }
 
 func (e *Engine) sendViaPeerMesh(dstPeer types.PublicKey, innerPkt []byte) error {
@@ -1930,12 +2003,9 @@ func (e *Engine) sendViaPeerMesh(dstPeer types.PublicKey, innerPkt []byte) error
 	if !ok {
 		return errors.New("no multi-hop peer route available")
 	}
-	nextEp, _, ok := e.selector.BestEndpoint(rt.NextHop)
-	if !ok || (e.disableUDP && nextEp.Proto == types.ProtoUDP) {
-		return errors.New("next-hop direct endpoint unavailable")
-	}
-	fwdFrame := protocol.EncodeRelayForward(protocol.DefaultHopTTL, e.cryptoMgr.LocalPublicKey(), dstPeer, innerPkt)
-	return e.hub.Send(context.Background(), nextEp, fwdFrame)
+	return e.sendMeshHop(rt.NextHop, protocol.MeshForward{
+		TTL: protocol.DefaultHopTTL, Source: e.cryptoMgr.LocalPublicKey(), Target: dstPeer, Inner: innerPkt,
+	})
 }
 
 func (e *Engine) sendReplyOverMeshOrRelay(dstPeer types.PublicKey, innerPkt []byte, preferred incomingSource) {
@@ -1952,6 +2022,9 @@ func (e *Engine) sendReplyOverMeshOrRelay(dstPeer types.PublicKey, innerPkt []by
 
 func (e *Engine) flushQueuedPackets(pr *peerRuntime, peerKey types.PublicKey, queued [][]byte) {
 	for _, ipPkt := range queued {
+		if !e.isRunning() || !e.pktFilter.AllowOutbound(ipPkt) {
+			continue
+		}
 		if wirePkt, err := e.cryptoMgr.SealPacket(peerKey, ipPkt); err == nil {
 			pr.txBytes.Add(uint64(len(ipPkt)))
 			e.sendWireToPeer(pr, wirePkt)
@@ -2051,6 +2124,9 @@ func (e *Engine) selectPathDecision(pr *peerRuntime, peerKey types.PublicKey) (p
 }
 
 func (e *Engine) sendWireToPeer(pr *peerRuntime, wirePkt []byte) {
+	if !e.isRunning() {
+		return
+	}
 	pr.mu.RLock()
 	peerKey := pr.meta.NodeKey
 	pr.mu.RUnlock()
@@ -2059,7 +2135,7 @@ func (e *Engine) sendWireToPeer(pr *peerRuntime, wirePkt []byte) {
 
 	switch decision {
 	case pathDecisionDirect:
-		if err := e.hub.Send(context.Background(), bestEp, wirePkt); err == nil {
+		if err := e.sendPeerPacket(context.Background(), bestEp, wirePkt); err == nil {
 			if e.selector.RecordTx(peerKey, bestEp) {
 				e.probePeerCandidates(peerKey, []types.Endpoint{bestEp})
 			}
@@ -2117,6 +2193,7 @@ func (e *Engine) executePunchBurst(peerKey types.PublicKey, cands []types.Endpoi
 	if !e.isRunning() {
 		return
 	}
+	cands = e.safePeerCandidates(cands)
 	if !e.disableUDP && e.hub.HasProto(types.ProtoUDP) {
 		udpTargets := nat.BuildUDPPunchTargets(cands, peerKind, peerStep)
 		if len(udpTargets) > 12 {
@@ -2130,7 +2207,7 @@ func (e *Engine) executePunchBurst(peerKey types.PublicKey, cands []types.Endpoi
 				e.selector.RecordProbeSent(peerKey, ep, probeID)
 				probe, err := e.buildAuthProbe(protocol.PacketPing, peerKey, probeID, now, "")
 				if err == nil {
-					_ = e.hub.Send(context.Background(), ep, probe)
+					_ = e.sendPeerPacket(context.Background(), ep, probe)
 				}
 			}
 			if round < 2 && len(udpTargets) > 0 {
@@ -2163,10 +2240,7 @@ func (e *Engine) probePeerCandidates(peerKey types.PublicKey, cands []types.Endp
 	if !e.isRunning() {
 		return
 	}
-	if len(cands) > transport.MaxCandidatesPerPeer {
-		cands = cands[:transport.MaxCandidatesPerPeer]
-	}
-	for _, ep := range cands {
+	for _, ep := range e.safePeerCandidates(cands) {
 		if ep.Proto == types.ProtoUDP && e.disableUDP {
 			continue
 		}
@@ -2180,7 +2254,7 @@ func (e *Engine) probePeerCandidates(peerKey types.PublicKey, cands []types.Endp
 			e.selector.RecordProbeSent(peerKey, targetEp, probeID)
 			probe, err := e.buildAuthProbe(protocol.PacketPing, peerKey, probeID, time.Now().UnixNano(), "")
 			if err == nil {
-				_ = e.hub.Send(ctx, targetEp, probe)
+				_ = e.sendPeerPacket(ctx, targetEp, probe)
 			}
 		}(ep)
 	}
@@ -2202,11 +2276,40 @@ func (e *Engine) sendControlOrProbeToPeer(pr *peerRuntime, pkt []byte) {
 		go func(targetEp types.Endpoint) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			_ = e.hub.Send(ctx, targetEp, pkt)
+			_ = e.sendPeerPacket(ctx, targetEp, pkt)
 		}(ep)
 	}
 	_ = e.sendViaPeerMesh(peerKey, pkt)
 	_ = e.relayCli.Send(peerKey, pkt)
+}
+
+func (e *Engine) safePeerCandidates(in []types.Endpoint) []types.Endpoint {
+	out := make([]types.Endpoint, 0, min(len(in), transport.MaxCandidatesPerPeer))
+	seen := make(map[types.Endpoint]bool)
+	for _, raw := range in {
+		if ep, ok := e.selector.SanitizeEndpoint(raw); ok && !seen[ep] {
+			seen[ep] = true
+			out = append(out, ep)
+			if len(out) >= transport.MaxCandidatesPerPeer {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// All peer-directed packets pass the same address policy, including sends
+// triggered directly by NAT coordination and replies to observed endpoints.
+// Control-server STUN addresses are handled separately.
+func (e *Engine) sendPeerPacket(ctx context.Context, raw types.Endpoint, pkt []byte) error {
+	if !e.isRunning() {
+		return errors.New("data plane is not authorized")
+	}
+	ep, ok := e.selector.SanitizeEndpoint(raw)
+	if !ok || (e.disableUDP && ep.Proto == types.ProtoUDP) {
+		return errors.New("invalid or disabled peer endpoint")
+	}
+	return e.hub.Send(ctx, ep, pkt)
 }
 
 func (e *Engine) collectLocalEndpoints() []types.Endpoint {
@@ -2244,7 +2347,9 @@ func (e *Engine) mapStreamLoop(ctx context.Context, serverURL, token string) {
 		default:
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+		streamCtx, cancel := context.WithCancel(ctx)
+		silence := time.AfterFunc(controlStreamIdleTimeout, cancel)
+		req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, streamURL, nil)
 		if err == nil {
 			req.Header.Set("Authorization", "Bearer "+token)
 			resp, err := e.httpClient.Do(req)
@@ -2253,19 +2358,23 @@ func (e *Engine) mapStreamLoop(ctx context.Context, serverURL, token string) {
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 				for scanner.Scan() {
-					if ctx.Err() != nil {
+					if streamCtx.Err() != nil {
 						break
 					}
 					var ev types.MapStreamEvent
-					if json.Unmarshal(scanner.Bytes(), &ev) == nil && ev.Type == "netmap" && ev.NetMap != nil {
-						e.applyNetMap(*ev.NetMap)
+					if json.Unmarshal(scanner.Bytes(), &ev) != nil || !e.acceptControlEvent(ctx, ev) {
+						break
 					}
+					silence.Reset(controlStreamIdleTimeout)
 				}
 				_ = resp.Body.Close()
 			} else if resp != nil {
+				e.handleControlRejection(ctx, resp.StatusCode)
 				_ = resp.Body.Close()
 			}
 		}
+		silence.Stop()
+		cancel()
 
 		select {
 		case <-ctx.Done():
@@ -2299,6 +2408,7 @@ func (e *Engine) sendHeartbeatOnce(ctx context.Context, serverURL, token string)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	if resp, err := e.httpClient.Do(req); err == nil {
+		e.handleControlRejection(ctx, resp.StatusCode)
 		_ = resp.Body.Close()
 	}
 }

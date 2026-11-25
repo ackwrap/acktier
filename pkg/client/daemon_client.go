@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/acktier/acktier/internal/daemon/localapi"
+	"github.com/acktier/acktier/internal/securehttp"
 	"github.com/acktier/acktier/pkg/types"
 )
 
@@ -39,7 +40,7 @@ func NewDaemonClient(apiURL string, httpCli *http.Client) *DaemonClient {
 	return &DaemonClient{
 		baseURL:    cleanURL,
 		token:      localapi.ReadTokenFile(cleanURL),
-		httpClient: httpCli,
+		httpClient: securehttp.NoRedirects(httpCli),
 	}
 }
 

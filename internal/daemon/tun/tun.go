@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-const DefaultMTU = 1380 // Leaves headroom for E2EE AEAD + Multi-Hop Relay headers within 1500 MTU
+const DefaultMTU = 1280 // Fits within a 1500-byte IPv6/UDP packet after AEAD and authenticated mesh wrapping.
 
 // Device abstracts an OS virtual network interface (Wintun, Linux /dev/net/tun, macOS utun) or in-memory test NIC.
 type Device interface {
@@ -67,18 +67,18 @@ func ExtractSrcIP(pkt []byte) (netip.Addr, bool) {
 
 // MemoryDevice implements Device entirely in memory for unprivileged testing and userspace netstack bridging.
 type MemoryDevice struct {
-	name      string
-	mtu       int
+	name       string
+	mtu        int
 	txToEngine chan []byte // OS/App -> Engine (ReadPacket reads from here)
 	rxFromNet  chan []byte // Engine -> OS/App (WritePacket writes to here)
 
-	mu     sync.RWMutex
-	ipv4   netip.Prefix
-	ipv6   netip.Prefix
-	routes []netip.Prefix
-	closed bool
+	mu        sync.RWMutex
+	ipv4      netip.Prefix
+	ipv6      netip.Prefix
+	routes    []netip.Prefix
+	closed    bool
 	closeOnce sync.Once
-	doneCh chan struct{}
+	doneCh    chan struct{}
 }
 
 func NewMemoryDevice(name string, mtu int) *MemoryDevice {

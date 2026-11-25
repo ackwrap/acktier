@@ -162,6 +162,7 @@ func main() {
 		Addr:              *listenAddr,
 		Handler:           ctrl.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       20 * time.Second, // Bound request bodies; the NetMap stream clears its read deadline.
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 16,
 		TLSConfig: &tls.Config{

@@ -2,6 +2,8 @@ package protocol_test
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -77,5 +79,39 @@ func TestWireRoundTrip(t *testing.T) {
 	}
 	if pType != protocol.PacketPong || sender != pubB || probeID != 99 || txNano != now || obs != "203.0.113.10:51820" {
 		t.Fatalf("unexpected probe decoded values")
+	}
+}
+
+func TestMeshFrameAuthenticatesThePreviousHopAndRecipient(t *testing.T) {
+	previous := types.PublicKey{1}
+	recipient := types.PublicKey{2}
+	target := types.PublicKey{3}
+	sign := func(data []byte) ([protocol.ControlAuthTagSize]byte, error) {
+		mac := hmac.New(sha256.New, []byte("test only"))
+		_, _ = mac.Write(data)
+		return [protocol.ControlAuthTagSize]byte(mac.Sum(nil)), nil
+	}
+	verify := func(hop types.PublicKey, frame []byte, tag [protocol.ControlAuthTagSize]byte) bool {
+		expected, _ := sign(frame)
+		return hop == previous && hmac.Equal(expected[:], tag[:])
+	}
+	want := protocol.MeshForward{
+		TTL: protocol.DefaultHopTTL, Previous: previous, Source: previous, Target: target,
+		SentAt: time.Now().Unix(), Sequence: 1, Inner: []byte("opaque"),
+	}
+	pkt, err := protocol.EncodeMeshForward(want, recipient, sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := protocol.DecodeAndVerifyMeshForward(pkt, recipient, verify)
+	if err != nil || got.Previous != previous || got.Source != want.Source || got.Target != target || !bytes.Equal(got.Inner, want.Inner) {
+		t.Fatalf("mesh frame did not round trip: %v", err)
+	}
+	if _, err := protocol.DecodeAndVerifyMeshForward(pkt, target, verify); err == nil {
+		t.Fatal("frame was accepted by a different recipient")
+	}
+	pkt[3]--
+	if _, err := protocol.DecodeAndVerifyMeshForward(pkt, recipient, verify); err == nil {
+		t.Fatal("TTL modification was not detected")
 	}
 }

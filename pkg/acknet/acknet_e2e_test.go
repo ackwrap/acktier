@@ -74,9 +74,9 @@ type memUDPHub struct {
 }
 
 type memUDP struct {
-	hub    *memUDPHub
-	local  *net.UDPAddr
-	rx     chan struct {
+	hub   *memUDPHub
+	local *net.UDPAddr
+	rx    chan struct {
 		from *net.UDPAddr
 		b    []byte
 	}
@@ -203,7 +203,7 @@ func TestSDK_AckNetHTTP_UDP_SOCKS5_And_EmbeddedClientInterop(t *testing.T) {
 	}
 	defer tcpLn.Close()
 
-	// 24 KB payload exercises multi-segment TCP MSS splitting (1240B * ~20 segments) & sliding-window ACKs!
+	// 24 KB payload exercises multi-segment TCP splitting and sliding-window ACKs.
 	largeBanner := bytes.Repeat([]byte("ACKNET-SDK-STREAM-OK-"), 1150)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/large", func(w http.ResponseWriter, r *http.Request) {

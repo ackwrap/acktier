@@ -51,6 +51,7 @@ func main() {
 		authKey           = flag.String("auth-key", "", "Optional PreAuthKey for unattended registration")
 		tlsCAFile         = flag.String("tls-ca", os.Getenv("ACKTIER_TLS_CA"), "Optional Root CA PEM file for verifying Control & Relay TLS")
 		allowInsecureHTTP = flag.Bool("insecure-http", false, "Allow plaintext HTTP/Relay to non-loopback server (lab testing only)")
+		controlLeaseTTL   = flag.Duration("control-lease-ttl", client.DefaultControlLeaseTTL, "How long to keep the last authorized NetMap without control updates (minimum 1m)")
 	)
 	flag.Parse()
 
@@ -69,6 +70,7 @@ func main() {
 	cfg.EnableLANDiscovery = *enableLANDis
 	cfg.TLSCAFile = *tlsCAFile
 	cfg.AllowInsecureHTTP = *allowInsecureHTTP
+	cfg.ControlLeaseTTL = *controlLeaseTTL
 	cfg.LocalAPIAddr = *apiAddr
 
 	node, err := client.NewNode(cfg)

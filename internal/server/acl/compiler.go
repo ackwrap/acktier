@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/acktier/acktier/pkg/types"
 )
@@ -142,6 +143,7 @@ func CompileForNode(pol types.ACLPolicy, _ types.PeerNode, allNodes []types.Peer
 	}
 
 	var out []types.FilterRule
+	internet := sync.OnceValue(func() []netip.Prefix { return internetPrefixes(allNodes) })
 	for _, entry := range pol.ACLs {
 		action := types.FilterAccept
 		if strings.EqualFold(strings.TrimSpace(entry.Action), "drop") {
@@ -155,7 +157,7 @@ func CompileForNode(pol types.ACLPolicy, _ types.PeerNode, allNodes []types.Peer
 
 		var srcPfx []netip.Prefix
 		for _, s := range entry.Src {
-			srcPfx = append(srcPfx, resolveSelector(s, pol, allNodes, true)...)
+			srcPfx = append(srcPfx, resolveSelector(s, pol, allNodes, true, internet)...)
 		}
 		srcPfx = dedupPrefixes(srcPfx)
 		if len(srcPfx) == 0 {
@@ -167,7 +169,7 @@ func CompileForNode(pol types.ACLPolicy, _ types.PeerNode, allNodes []types.Peer
 			if err != nil {
 				continue
 			}
-			dstPfx := dedupPrefixes(resolveSelector(sel, pol, allNodes, false))
+			dstPfx := dedupPrefixes(resolveSelector(sel, pol, allNodes, false, internet))
 			if len(dstPfx) == 0 {
 				continue
 			}
@@ -265,10 +267,16 @@ func splitDstAndPorts(raw string) (selector string, ranges []portRange, err erro
 	return selector, ranges, nil
 }
 
-func resolveSelector(sel string, pol types.ACLPolicy, nodes []types.PeerNode, isSrc bool) []netip.Prefix {
+func resolveSelector(sel string, pol types.ACLPolicy, nodes []types.PeerNode, isSrc bool, internet func() []netip.Prefix) []netip.Prefix {
 	sel = strings.TrimSpace(sel)
-	if sel == "*" || (strings.EqualFold(sel, "autogroup:internet") && !isSrc) {
+	if sel == "*" {
 		return []netip.Prefix{allIPv4, allIPv6}
+	}
+	if strings.EqualFold(sel, "autogroup:internet") {
+		if isSrc {
+			return nil
+		}
+		return internet()
 	}
 
 	if hostVal, ok := pol.Hosts[sel]; ok {
@@ -280,7 +288,7 @@ func resolveSelector(sel string, pol types.ACLPolicy, nodes []types.PeerNode, is
 		var out []netip.Prefix
 		for _, m := range members {
 			if !strings.HasPrefix(m, "group:") {
-				out = append(out, resolveSelector(m, pol, nodes, isSrc)...)
+				out = append(out, resolveSelector(m, pol, nodes, isSrc, internet)...)
 			}
 		}
 		return out

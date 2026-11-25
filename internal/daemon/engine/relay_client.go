@@ -34,19 +34,17 @@ type RelayTLSConfig struct {
 // RelayClient maintains a persistent upgraded TLS/TCP stream to an acktier-server `/relay` endpoint
 // and continuously measures server relay RTT for global path cost comparison.
 type RelayClient struct {
-	dial      DialFunc
-	nodeKey   types.PublicKey
-	nodeToken string
-	onRecv    func(src types.PublicKey, inner []byte)
+	dial    DialFunc
+	nodeKey types.PublicKey
+	onRecv  func(src types.PublicKey, inner []byte)
 
-	mu            sync.RWMutex
-	writeMu       sync.Mutex
-	relayAddr     string
-	tlsOpts       RelayTLSConfig
-	conn          net.Conn
-	connected     atomic.Bool
-	rttMicros     atomic.Int64
-	lastPingID    atomic.Uint64
+	mu         sync.RWMutex
+	writeMu    sync.Mutex
+	run        context.Context
+	conn       net.Conn
+	connected  atomic.Bool
+	rttMicros  atomic.Int64
+	lastPingID atomic.Uint64
 }
 
 func NewRelayClient(dial DialFunc, nodeKey types.PublicKey, onRecv func(src types.PublicKey, inner []byte)) *RelayClient {
@@ -88,30 +86,28 @@ func isLoopbackHostPort(addr string) bool {
 
 func (rc *RelayClient) Run(ctx context.Context, relayAddr, nodeToken string, tlsOpts RelayTLSConfig) {
 	rc.mu.Lock()
-	rc.relayAddr = relayAddr
-	rc.nodeToken = nodeToken
-	rc.tlsOpts = tlsOpts
+	if ctx.Err() != nil {
+		rc.mu.Unlock()
+		return
+	}
+	rc.run = ctx
 	rc.mu.Unlock()
 
 	backoff := 200 * time.Millisecond
 	for {
 		select {
 		case <-ctx.Done():
-			rc.CloseCurrent()
 			return
 		default:
 		}
 
 		err := rc.connectAndServe(ctx, relayAddr, nodeToken, tlsOpts)
-		rc.connected.Store(false)
 		if ctx.Err() != nil {
-			rc.CloseCurrent()
 			return
 		}
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				rc.CloseCurrent()
 				return
 			case <-time.After(backoff):
 			}
@@ -135,6 +131,8 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string, 
 		cancel()
 		return err
 	}
+	stopClose := context.AfterFunc(ctx, func() { _ = rawConn.Close() })
+	defer stopClose()
 
 	conn := rawConn
 	if tlsOpts.UseTLS {
@@ -162,7 +160,12 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string, 
 	cancel()
 
 	defer func() {
-		rc.connected.Store(false)
+		rc.mu.Lock()
+		if rc.conn == conn {
+			rc.conn = nil
+			rc.connected.Store(false)
+		}
+		rc.mu.Unlock()
 		_ = conn.Close()
 	}()
 
@@ -204,9 +207,13 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string, 
 	_ = conn.SetDeadline(time.Time{})
 
 	rc.mu.Lock()
+	if rc.run != ctx || ctx.Err() != nil {
+		rc.mu.Unlock()
+		return context.Canceled
+	}
 	rc.conn = conn
-	rc.mu.Unlock()
 	rc.connected.Store(true)
+	rc.mu.Unlock()
 
 	// Measure initial Relay Server RTT right away & keepalive every 15s
 	rc.SendServerPing()
@@ -219,7 +226,6 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string, 
 		for {
 			select {
 			case <-ctx.Done():
-				_ = conn.Close()
 				return
 			case <-stopWatch:
 				return
@@ -232,6 +238,9 @@ func (rc *RelayClient) connectAndServe(ctx context.Context, addr, token string, 
 	for {
 		frame, err := protocol.ReadFrame(br)
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		pType, _, _, err := protocol.ParseHeader(frame)
@@ -303,10 +312,14 @@ func (rc *RelayClient) Send(dst types.PublicKey, inner []byte) error {
 
 func (rc *RelayClient) CloseCurrent() {
 	rc.mu.Lock()
-	if rc.conn != nil {
-		_ = rc.conn.Close()
-		rc.conn = nil
-	}
-	rc.mu.Unlock()
+	conn := rc.conn
+	rc.conn = nil
+	rc.run = nil
 	rc.connected.Store(false)
+	rc.rttMicros.Store(0)
+	rc.lastPingID.Store(0)
+	rc.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
