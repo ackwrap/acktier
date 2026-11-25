@@ -13,6 +13,7 @@ import (
 
 	"github.com/acktier/acktier/internal/daemon/localapi"
 	"github.com/acktier/acktier/pkg/client"
+	"github.com/acktier/acktier/pkg/types"
 )
 
 func main() {
@@ -27,7 +28,9 @@ func main() {
 		enableLANDis = flag.Bool("lan-discovery", true, "Enable L2 LAN peer discovery beacons")
 		tunMode      = flag.String("tun", "auto", "TUN device mode: auto | os | memory")
 		ifName       = flag.String("ifname", "", "Custom virtual network interface name")
-		canRelay     = flag.Bool("can-relay", false, "Allow this node to act as a peer mesh ciphertext relay")
+		relayMode    = flag.String("relay-mode", "auto", "Peer relay mode: auto (public IP auto-enables) | on | off")
+		maxRelayMbps = flag.Float64("relay-max-mbps", 0, "Optional transit relay bandwidth limit in Mbps (0 = unlimited)")
+		canRelay     = flag.Bool("can-relay", false, "Force enable peer relay (alias for -relay-mode=on)")
 		serverURL    = flag.String("server", "", "Optional Control Server URL for immediate auto-up")
 		authKey      = flag.String("auth-key", "", "Optional PreAuthKey for unattended registration")
 	)
@@ -63,9 +66,11 @@ func main() {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			nm, err := node.Up(ctx, client.UpOptions{
-				ServerURL: *serverURL,
-				AuthKey:   *authKey,
-				CanRelay:  *canRelay,
+				ServerURL:    *serverURL,
+				AuthKey:      *authKey,
+				RelayMode:    types.RelayMode(*relayMode),
+				MaxRelayMbps: *maxRelayMbps,
+				CanRelay:     *canRelay,
 			})
 			if err != nil {
 				log.Printf("[acktierd] auto-up failed: %v", err)

@@ -115,7 +115,7 @@ func (c *segUDPConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 func TestPhase3ThreeHopPeerRelayAndSelfHealingReroute(t *testing.T) {
 	tmp := t.TempDir()
-	st, _ := store.NewFileStore(filepath.Join(tmp, "srv.json"))
+	st, _ := store.NewFileStore("")
 	pak, _ := st.CreatePreAuthKey("mesh", true, false, nil, time.Hour)
 
 	// Center Relay is intentionally DISABLED (RelayAddr: "") so ONLY Peer-to-Peer Mesh Relay can bridge islands!

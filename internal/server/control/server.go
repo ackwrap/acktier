@@ -389,7 +389,7 @@ func endpointsEqual(a, b []types.Endpoint) bool {
 	return true
 }
 
-// linksMeaningfullyChanged returns false when neighbor sets match and RTTs differ by < 25% (avoids broadcast storms).
+// linksMeaningfullyChanged returns false when neighbor sets match and quality-adjusted costs differ by < 20%.
 func linksMeaningfullyChanged(oldLinks, newLinks []types.PeerLink) bool {
 	if newLinks == nil {
 		return true
@@ -399,18 +399,19 @@ func linksMeaningfullyChanged(oldLinks, newLinks []types.PeerLink) bool {
 	}
 	oldMap := make(map[types.PublicKey]float64, len(oldLinks))
 	for _, l := range oldLinks {
-		oldMap[l.Target] = l.RTTMillis
+		oldMap[l.Target] = l.EffectiveCostMs()
 	}
 	for _, nl := range newLinks {
-		oldRTT, ok := oldMap[nl.Target]
+		oldCost, ok := oldMap[nl.Target]
 		if !ok {
 			return false
 		}
-		diff := nl.RTTMillis - oldRTT
+		newCost := nl.EffectiveCostMs()
+		diff := newCost - oldCost
 		if diff < 0 {
 			diff = -diff
 		}
-		if oldRTT > 0 && diff/oldRTT > 0.25 && diff > 2.0 {
+		if oldCost > 0 && diff/oldCost > 0.20 && diff > 2.0 {
 			return false
 		}
 	}

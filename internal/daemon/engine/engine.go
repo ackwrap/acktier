@@ -66,6 +66,7 @@ type peerRuntime struct {
 	meta                 types.PeerNode
 	lastHandshake        time.Time
 	lastPunch            time.Time
+	lastPeerRelayRx      time.Time // Symmetric stepping-stone return stickiness when peer routes to us via Peer Relay
 	lastRTTMicros        int64
 	lastCenterRelayRTTUs int64
 	rxBytes              atomic.Uint64
@@ -74,22 +75,24 @@ type peerRuntime struct {
 
 // PeerStatus summarizes live connectivity and traffic telemetry for CLI / GUI display.
 type PeerStatus struct {
-	ID         types.NodeID   `json:"id"`
-	Name       string         `json:"name"`
-	Hostname   string         `json:"hostname"`
-	OS         string         `json:"os"`
-	NodeKey    string         `json:"nodeKey"`
-	IPv4       string         `json:"ipv4"`
-	IPv6       string         `json:"ipv6"`
-	Online     bool           `json:"online"`
-	CanRelay   bool           `json:"canRelay,omitempty"`
-	ActivePath string         `json:"activePath"` // "direct-*" | "peer-relay" | "relay" | "idle"
-	DirectAddr string         `json:"directAddr,omitempty"`
-	MeshHops   string         `json:"meshHops,omitempty"`
-	RTTMillis  float64        `json:"rttMillis,omitempty"`
-	RxBytes    uint64         `json:"rxBytes"`
-	TxBytes    uint64         `json:"txBytes"`
-	AllowedIPs []netip.Prefix `json:"allowedIPs,omitempty"`
+	ID              types.NodeID   `json:"id"`
+	Name            string         `json:"name"`
+	Hostname        string         `json:"hostname"`
+	OS              string         `json:"os"`
+	NodeKey         string         `json:"nodeKey"`
+	IPv4            string         `json:"ipv4"`
+	IPv6            string         `json:"ipv6"`
+	Online          bool           `json:"online"`
+	CanRelay        bool           `json:"canRelay,omitempty"`
+	ActivePath      string         `json:"activePath"` // "direct-*" | "peer-relay" | "relay" | "idle"
+	DirectAddr      string         `json:"directAddr,omitempty"`
+	MeshHops        string         `json:"meshHops,omitempty"`
+	RTTMillis       float64        `json:"rttMillis,omitempty"`
+	LossRate        float64        `json:"lossRate,omitempty"`
+	EffectiveCostMs float64        `json:"effectiveCostMs,omitempty"`
+	RxBytes         uint64         `json:"rxBytes"`
+	TxBytes         uint64         `json:"txBytes"`
+	AllowedIPs      []netip.Prefix `json:"allowedIPs,omitempty"`
 }
 
 // StatusResponse represents the full local daemon status returned over LocalAPI.
@@ -102,7 +105,9 @@ type StatusResponse struct {
 	IPv6               string                          `json:"ipv6,omitempty"`
 	ServerURL          string                          `json:"serverUrl,omitempty"`
 	ExitNode           string                          `json:"exitNode,omitempty"`
+	RelayMode          types.RelayMode                 `json:"relayMode"`
 	CanRelay           bool                            `json:"canRelay"`
+	MaxRelayMbps       float64                         `json:"maxRelayMbps,omitempty"`
 	RelayConnected     bool                            `json:"relayConnected"`
 	CenterRelayRTTMs   float64                         `json:"centerRelayRttMs,omitempty"`
 	PeerRelayedFrames  uint64                          `json:"peerRelayedFrames"`
@@ -148,12 +153,14 @@ type NetCheckReport struct {
 
 // UpRequest parameters for bringing up the AckTier overlay network.
 type UpRequest struct {
-	ServerURL        string         `json:"serverUrl"`
-	AuthKey          string         `json:"authKey,omitempty"`
-	Hostname         string         `json:"hostname,omitempty"`
-	AdvertisedRoutes []netip.Prefix `json:"advertisedRoutes,omitempty"`
-	ExitNode         string         `json:"exitNode,omitempty"`
-	CanRelay         bool           `json:"canRelay,omitempty"`
+	ServerURL        string          `json:"serverUrl"`
+	AuthKey          string          `json:"authKey,omitempty"`
+	Hostname         string          `json:"hostname,omitempty"`
+	AdvertisedRoutes []netip.Prefix  `json:"advertisedRoutes,omitempty"`
+	ExitNode         string          `json:"exitNode,omitempty"`
+	RelayMode        types.RelayMode `json:"relayMode,omitempty"` // "auto" (default) | "on" | "off"
+	MaxRelayMbps     float64         `json:"maxRelayMbps,omitempty"`
+	CanRelay         bool            `json:"canRelay,omitempty"`
 }
 
 // PingResult reports overlay probe latency and transport route.
@@ -204,6 +211,9 @@ type Engine struct {
 	hbTriggerCh       chan struct{}
 	peerRelayedFrames atomic.Uint64
 	peerRelayedBytes  atomic.Uint64
+	rlMu              sync.Mutex
+	rlTokens          float64
+	rlLastRefill      time.Time
 
 	probeSeq    atomic.Uint64
 	pingMu      sync.Mutex
@@ -295,13 +305,36 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 	if routes == nil {
 		routes = cur.AdvertisedRoutes
 	}
-	canRelay := req.CanRelay || cur.CanRelay
+
+	relayMode := req.RelayMode
+	if relayMode == "" {
+		if req.CanRelay {
+			relayMode = types.RelayModeOn
+		} else if cur.RelayMode != "" {
+			relayMode = cur.RelayMode
+		} else if cur.CanRelay {
+			relayMode = types.RelayModeOn
+		} else {
+			relayMode = types.RelayModeAuto
+		}
+	}
+	maxMbps := req.MaxRelayMbps
+	if maxMbps == 0 && cur.MaxRelayMbps > 0 {
+		maxMbps = cur.MaxRelayMbps
+	}
 
 	if e.enablePortMap {
 		e.refreshPortMappings(ctx)
 	}
 
+	_ = e.stateMgr.Update(func(s *state.ConfigState) {
+		s.RelayMode = relayMode
+		s.MaxRelayMbps = maxMbps
+		s.CanRelay = (relayMode == types.RelayModeOn)
+	})
+
 	endpoints := e.collectLocalEndpoints()
+	canRelay := e.effectiveCanRelay()
 	regReq := types.RegisterRequest{
 		MachineKey:       cur.MachineKey.Public(),
 		NodeKey:          cur.NodeKey.Public(),
@@ -351,6 +384,8 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 				s.ExitNode = req.ExitNode
 			}
 		}
+		s.RelayMode = relayMode
+		s.MaxRelayMbps = maxMbps
 		s.CanRelay = canRelay
 		s.WantRunning = true
 	})
@@ -537,10 +572,15 @@ func (e *Engine) Status() StatusResponse {
 				ps.ActivePath = "peer-relay"
 				ps.MeshHops = formatHopNames(meshRt.Hops, namesMap)
 				ps.RTTMillis = effRTT
+				ps.EffectiveCostMs = meshRt.TotalCostMs
 			case pathDecisionDirect:
 				ps.ActivePath = "direct-" + string(bestEp.Proto)
 				ps.DirectAddr = bestEp.Addr
 				ps.RTTMillis = effRTT
+				if bq, ok := e.selector.BestQuality(p.NodeKey); ok {
+					ps.LossRate = bq.LossRate
+					ps.EffectiveCostMs = bq.EffectiveCostMs
+				}
 			case pathDecisionCenterRelay:
 				if e.cryptoMgr.HasActiveSession(p.NodeKey) {
 					ps.ActivePath = "relay"
@@ -565,6 +605,10 @@ func (e *Engine) Status() StatusResponse {
 	}
 	gwPkts, _ := e.gateway.Stats()
 	aclRules, aclDropIn, aclDropOut := e.pktFilter.Stats()
+	relayMode := st.RelayMode
+	if relayMode == "" {
+		relayMode = types.RelayModeAuto
+	}
 	res := StatusResponse{
 		State:              stateStr,
 		TUNName:            e.tunDev.Name(),
@@ -572,7 +616,9 @@ func (e *Engine) Status() StatusResponse {
 		SelfNodeKey:        st.NodeKey.Public().ShortString(),
 		ServerURL:          st.ServerURL,
 		ExitNode:           st.ExitNode,
-		CanRelay:           st.CanRelay,
+		RelayMode:          relayMode,
+		CanRelay:           e.effectiveCanRelay(),
+		MaxRelayMbps:       st.MaxRelayMbps,
 		RelayConnected:     e.relayCli.Connected(),
 		CenterRelayRTTMs:   e.relayCli.RTTMillis(),
 		PeerRelayedFrames:  e.peerRelayedFrames.Load(),
@@ -598,7 +644,6 @@ func (e *Engine) Status() StatusResponse {
 
 // MeshStatus returns the computed Dijkstra multi-hop routing table and local transit statistics.
 func (e *Engine) MeshStatus() MeshStatusReport {
-	st := e.stateMgr.Get()
 	routes, names := e.meshRouter.AllRoutes()
 
 	e.mu.RLock()
@@ -642,7 +687,7 @@ func (e *Engine) MeshStatus() MeshStatusReport {
 		})
 	}
 	return MeshStatusReport{
-		CanRelay:          st.CanRelay,
+		CanRelay:          e.effectiveCanRelay(),
 		PeerRelayedFrames: e.peerRelayedFrames.Load(),
 		PeerRelayedBytes:  e.peerRelayedBytes.Load(),
 		Routes:            infos,
@@ -854,9 +899,9 @@ func (e *Engine) applyNetMap(nm types.NetMap) {
 		e.natDetector.SetSTUNServers(nm.Relays[0].STUNAddr, nm.Relays[0].STUNAltAddr)
 	}
 
-	// Proactively probe newly discovered online peers so direct neighbor links converge in milliseconds
+	// Proactively run a multi-sample calibration burst on newly discovered peers so RTT, Jitter, & Loss converge fast!
 	for _, np := range newlyAddedPeers {
-		e.probePeerCandidates(np.NodeKey, np.Endpoints)
+		go e.probePeerCalibrationBurst(np.NodeKey, np.Endpoints)
 	}
 
 	if nm.Self.IPv4.IsValid() && nm.Self.IPv4 != prevSelfV4 {
@@ -890,17 +935,20 @@ func (e *Engine) collectDirectLinks() []types.PeerLink {
 
 	var out []types.PeerLink
 	for _, k := range keys {
-		if ep, rttMs, ok := e.selector.BestEndpoint(k); ok {
-			if e.disableUDP && ep.Proto == types.ProtoUDP {
+		if q, ok := e.selector.BestQuality(k); ok {
+			if e.disableUDP && q.Endpoint.Proto == types.ProtoUDP {
 				continue
 			}
+			rttMs := q.RTTMillis
 			if rttMs <= 0 {
 				rttMs = 5.0
 			}
 			out = append(out, types.PeerLink{
-				Target:    k,
-				RTTMillis: rttMs,
-				Proto:     ep.Proto,
+				Target:       k,
+				RTTMillis:    rttMs,
+				JitterMillis: q.JitterMillis,
+				LossRate:     q.LossRate,
+				Proto:        q.Endpoint.Proto,
 			})
 		}
 	}
@@ -1064,9 +1112,10 @@ func (e *Engine) recordDirectLinkRx(peerKey types.PublicKey, srcEp types.Endpoin
 	_, _, hadBefore := e.selector.BestEndpoint(peerKey)
 	e.selector.RecordRx(peerKey, srcEp, rtt)
 	if !hadBefore {
-		// Newly verified direct neighbor! Recompute mesh graph & publish link-state immediately.
+		// Newly verified direct neighbor (e.g. inbound NAT client)! Calibrate RTT/Loss & publish link-state.
 		e.recomputeMeshRoutes()
 		e.requestImmediateHeartbeat()
+		go e.probePeerCalibrationBurst(peerKey, []types.Endpoint{srcEp})
 	}
 }
 
@@ -1086,17 +1135,23 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 		if err != nil {
 			return
 		}
+		// Keep direct return NAT mapping alive for 1st-hop sender (symmetric bidirectional CN2 return path!)
+		if ttl == protocol.DefaultHopTTL && srcEp.Addr != "" && e.getPeerRuntime(origSrc) != nil {
+			e.recordDirectLinkRx(origSrc, srcEp, 0)
+		}
 		localPub := e.cryptoMgr.LocalPublicKey()
 		if finalDst == localPub {
-			// Refresh transit neighbor reachability if immediate sender is known
 			e.handleIncomingWirePacket(inner, types.Endpoint{}, sourcePeerRelay, origSrc)
 			return
 		}
-		// We are an intermediate Peer Relay node: enforce CanRelay, TTL, and same-network authorization!
-		if ttl <= 1 || !e.stateMgr.Get().CanRelay {
+		// We are an intermediate Peer Relay node: enforce effectiveCanRelay, rate limit, TTL, and network auth!
+		if ttl <= 1 || !e.effectiveCanRelay() {
 			return
 		}
 		if e.getPeerRuntime(origSrc) == nil || e.getPeerRuntime(finalDst) == nil {
+			return
+		}
+		if !e.allowRelayBandwidth(len(pkt)) {
 			return
 		}
 		fwdFrame := protocol.EncodeRelayForward(ttl-1, origSrc, finalDst, inner)
@@ -1118,6 +1173,11 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 			e.recordDirectLinkRx(peerKey, srcEp, 0)
 			_ = e.hub.Send(context.Background(), srcEp, ackPkt)
 		} else {
+			if srcMode == sourcePeerRelay {
+				pr.mu.Lock()
+				pr.lastPeerRelayRx = time.Now()
+				pr.mu.Unlock()
+			}
 			e.sendReplyOverMeshOrRelay(peerKey, ackPkt, srcMode)
 		}
 		e.flushQueuedPackets(pr, peerKey, queued)
@@ -1154,6 +1214,10 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 		pr.rxBytes.Add(uint64(len(plainIP)))
 		if srcMode == sourceDirect && srcEp.Addr != "" {
 			e.recordDirectLinkRx(peerKey, srcEp, 0)
+		} else if srcMode == sourcePeerRelay {
+			pr.mu.Lock()
+			pr.lastPeerRelayRx = time.Now()
+			pr.mu.Unlock()
 		}
 
 		// Enforce inbound Zero-Trust ACL + Stateful Conntrack return-traffic allowance
@@ -1221,7 +1285,12 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 		}
 		rtt := time.Since(time.Unix(0, txNano))
 		if sender == e.cryptoMgr.LocalPublicKey() && obs != "" {
+			wasRelay := e.effectiveCanRelay()
 			e.natDetector.RecordObservation(srcEp.Addr, obs, rtt, localInterfaceIPs())
+			if !wasRelay && e.effectiveCanRelay() {
+				// STUN just proved we are open-public -> advertise auto-enabled CanRelay immediately!
+				e.requestImmediateHeartbeat()
+			}
 			return
 		}
 
@@ -1242,7 +1311,12 @@ func (e *Engine) handleIncomingWirePacket(pkt []byte, srcEp types.Endpoint, srcM
 			}
 			pr.mu.Unlock()
 			if srcMode == sourceDirect && srcEp.Addr != "" {
-				e.recordDirectLinkRx(sender, srcEp, rtt)
+				_, _, hadBefore := e.selector.BestEndpoint(sender)
+				e.selector.RecordProbeRx(sender, srcEp, probeID, rtt)
+				e.recomputeMeshRoutes()
+				if !hadBefore {
+					e.requestImmediateHeartbeat()
+				}
 			}
 		}
 
@@ -1295,10 +1369,10 @@ func (e *Engine) forwardMeshRelayFrame(origSrc, finalDst types.PublicKey, fwdFra
 	return false
 }
 
-// sendViaPeerMesh encapsulates innerPkt in PacketRelayForward and dispatches to the computed Dijkstra NextHop.
+// sendViaPeerMesh encapsulates innerPkt in PacketRelayForward and dispatches to the computed Dijkstra stepping-stone NextHop.
 func (e *Engine) sendViaPeerMesh(dstPeer types.PublicKey, innerPkt []byte) error {
-	rt, ok := e.meshRouter.Lookup(dstPeer)
-	if !ok || !rt.IsPeerRelayed {
+	rt, ok := e.meshRouter.LookupRelay(dstPeer)
+	if !ok {
 		return errors.New("no multi-hop peer route available")
 	}
 	nextEp, _, ok := e.selector.BestEndpoint(rt.NextHop)
@@ -1369,18 +1443,17 @@ func (e *Engine) estimateCenterRelayCostMs(pr *peerRuntime) (rttMs float64, cost
 	return rttMs, rttMs + centerRelayPenaltyMs, true
 }
 
-// selectPathDecision runs unified cost comparison across Verified Direct, Multi-Hop Peer Relay, and Center Relay.
+// selectPathDecision runs unified quality-adjusted cost comparison across Direct, Multi-Hop Peer Relay, and Center Relay.
 func (e *Engine) selectPathDecision(pr *peerRuntime, peerKey types.PublicKey) (pathDecisionKind, types.Endpoint, mesh.Route, float64) {
-	bestEp, directRTT, hasDirect := e.selector.BestEndpoint(peerKey)
-	if hasDirect && e.disableUDP && bestEp.Proto == types.ProtoUDP {
+	bestQ, hasDirect := e.selector.BestQuality(peerKey)
+	if hasDirect && e.disableUDP && bestQ.Endpoint.Proto == types.ProtoUDP {
 		hasDirect = false
 	}
 
-	meshRt, hasMesh := e.meshRouter.Lookup(peerKey)
-	hasPeerRelay := hasMesh && meshRt.IsPeerRelayed
+	meshRt, hasPeerRelay := e.meshRouter.LookupRelay(peerKey)
 	centerRTT, centerCost, hasCenter := e.estimateCenterRelayCostMs(pr)
 
-	// Pick the better Relay between Peer Multi-Hop Mesh and Center Relay based on measured latency!
+	// Pick the better Relay between Peer Multi-Hop Mesh (e.g. CN2 stepping-stone!) and Center Relay
 	bestRelayKind := pathDecisionNone
 	bestRelayCost := 0.0
 	bestRelayRTT := 0.0
@@ -1405,11 +1478,21 @@ func (e *Engine) selectPathDecision(pr *peerRuntime, peerKey types.PublicKey) (p
 	}
 
 	if hasDirect {
-		// Bypass degraded Direct path if either Peer Mesh OR Center Relay beats Direct by > 10ms!
-		if bestRelayKind != pathDecisionNone && directRTT > 0 && bestRelayCost+10.0 < directRTT {
+		// Symmetric Stepping-Stone Return Path: if peer is actively sending data to us via Peer-Relay
+		// (because peer detected direct congestion/loss), return traffic symmetrically via Peer-Relay too!
+		if hasPeerRelay && pr != nil {
+			pr.mu.RLock()
+			peerPrefersMesh := !pr.lastPeerRelayRx.IsZero() && time.Since(pr.lastPeerRelayRx) < 15*time.Second
+			pr.mu.RUnlock()
+			if peerPrefersMesh {
+				return pathDecisionPeerMesh, types.Endpoint{}, meshRt, meshRt.TotalCostMs
+			}
+		}
+		// Bypass lossy/jittery/high-RTT Direct path (e.g. congested US-West 163) if CN2 Peer Relay or Center Relay beats Direct EffectiveCost by > 10ms!
+		if bestRelayKind != pathDecisionNone && bestQ.EffectiveCostMs > 0 && bestRelayCost+10.0 < bestQ.EffectiveCostMs {
 			return bestRelayKind, types.Endpoint{}, meshRt, bestRelayRTT
 		}
-		return pathDecisionDirect, bestEp, mesh.Route{}, directRTT
+		return pathDecisionDirect, bestQ.Endpoint, mesh.Route{}, bestQ.RTTMillis
 	}
 
 	if bestRelayKind != pathDecisionNone {
@@ -1501,7 +1584,25 @@ func (e *Engine) executePunchBurst(peerKey types.PublicKey, cands []types.Endpoi
 	e.probePeerCandidates(peerKey, cands)
 }
 
-func (e *Engine) probePeerCandidates(_ types.PublicKey, cands []types.Endpoint) {
+func (e *Engine) probePeerCalibrationBurst(peerKey types.PublicKey, cands []types.Endpoint) {
+	for i := 0; i < 6; i++ {
+		select {
+		case <-e.closedCh:
+			return
+		default:
+		}
+		e.probePeerCandidates(peerKey, cands)
+		if i < 5 {
+			time.Sleep(35 * time.Millisecond)
+		}
+	}
+	// Allow probeLossGrace (250ms) to settle so dropped probes are reflected in LossRate before publishing Links
+	time.Sleep(270 * time.Millisecond)
+	e.recomputeMeshRoutes()
+	e.requestImmediateHeartbeat()
+}
+
+func (e *Engine) probePeerCandidates(peerKey types.PublicKey, cands []types.Endpoint) {
 	localPub := e.cryptoMgr.LocalPublicKey()
 	for _, ep := range cands {
 		if ep.Proto == types.ProtoUDP && e.disableUDP {
@@ -1513,7 +1614,9 @@ func (e *Engine) probePeerCandidates(_ types.PublicKey, cands []types.Endpoint) 
 		go func(targetEp types.Endpoint) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			probe := protocol.EncodeProbePacket(protocol.PacketPing, localPub, e.probeSeq.Add(1), time.Now().UnixNano(), "")
+			probeID := e.probeSeq.Add(1)
+			e.selector.RecordProbeSent(peerKey, targetEp, probeID)
+			probe := protocol.EncodeProbePacket(protocol.PacketPing, localPub, probeID, time.Now().UnixNano(), "")
 			_ = e.hub.Send(ctx, targetEp, probe)
 		}(ep)
 	}
@@ -1617,7 +1720,7 @@ func (e *Engine) sendHeartbeatOnce(ctx context.Context, serverURL, token string)
 		Endpoints:        e.collectLocalEndpoints(),
 		Links:            e.collectDirectLinks(),
 		AdvertisedRoutes: st.AdvertisedRoutes,
-		CanRelay:         st.CanRelay,
+		CanRelay:         e.effectiveCanRelay(),
 	}
 	raw, _ := json.Marshal(hb)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverURL+"/api/v1/node/heartbeat", bytes.NewReader(raw))
@@ -1727,6 +1830,102 @@ func formatHopNames(hops []types.PublicKey, names map[types.PublicKey]string) st
 		}
 	}
 	return strings.Join(parts, " -> ")
+}
+
+var cgnatRange = netip.MustParsePrefix("100.64.0.0/10")
+
+func isPublicRoutableIP(ip netip.Addr) bool {
+	if !ip.IsValid() {
+		return false
+	}
+	ip = ip.Unmap()
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	if ip.Is4() && cgnatRange.Contains(ip) {
+		return false
+	}
+	return true
+}
+
+// effectiveCanRelay resolves RelayMode ("auto" | "on" | "off"):
+// In "auto" mode (default), nodes with a public IP, STUN open-public NAT, or active UPnP port map
+// automatically become stepping-stone relays, while private NAT leaf devices stay false!
+func (e *Engine) effectiveCanRelay() bool {
+	st := e.stateMgr.Get()
+	switch st.RelayMode {
+	case types.RelayModeOff:
+		return false
+	case types.RelayModeOn:
+		return true
+	}
+	if st.CanRelay && st.RelayMode == "" {
+		return true
+	}
+	// Auto-detect public reachability!
+	if kind, _, _, _ := e.natDetector.Snapshot(); kind == nat.KindPublic {
+		return true
+	}
+	if len(e.portMapper.MappedEndpoints()) > 0 {
+		return true
+	}
+	// Check explicitly bound public transport IPs
+	for _, proto := range []types.TransportProto{types.ProtoUDP, types.ProtoTCP, types.ProtoQUIC, types.ProtoWSS} {
+		if drv := e.hub.Driver(proto); drv != nil {
+			if host, _, err := net.SplitHostPort(drv.LocalAddr()); err == nil {
+				if ip, pErr := netip.ParseAddr(host); pErr == nil && isPublicRoutableIP(ip) {
+					return true
+				}
+			}
+		}
+	}
+	// If at least one transport listens on 0.0.0.0 / ::, check if host NIC owns a public IP
+	if len(e.hub.LocalPorts()) > 0 {
+		for _, ip := range localInterfaceIPs() {
+			if isPublicRoutableIP(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// allowRelayBandwidth enforces optional MaxRelayMbps token-bucket rate limiting on transit packets.
+func (e *Engine) allowRelayBandwidth(nBytes int) bool {
+	maxMbps := e.stateMgr.Get().MaxRelayMbps
+	if maxMbps <= 0 {
+		return true
+	}
+	rateBytesPerSec := maxMbps * 125000.0
+	burst := rateBytesPerSec * 0.25
+	if burst < 65536 {
+		burst = 65536
+	}
+
+	now := time.Now()
+	e.rlMu.Lock()
+	defer e.rlMu.Unlock()
+
+	if e.rlLastRefill.IsZero() {
+		e.rlTokens = burst
+		e.rlLastRefill = now
+	} else {
+		elapsed := now.Sub(e.rlLastRefill).Seconds()
+		if elapsed > 0 {
+			e.rlTokens += elapsed * rateBytesPerSec
+			if e.rlTokens > burst {
+				e.rlTokens = burst
+			}
+			e.rlLastRefill = now
+		}
+	}
+
+	need := float64(nBytes)
+	if e.rlTokens < need {
+		return false
+	}
+	e.rlTokens -= need
+	return true
 }
 
 func localInterfaceIPs() []netip.Addr {

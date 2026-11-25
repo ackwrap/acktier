@@ -35,7 +35,7 @@ func buildDNSQueryPacket(srcIP netip.Addr, qName string, qType dnsmessage.Type) 
 
 func TestPhase4MagicDNSStatefulACLSubnetRouterAndExitNode(t *testing.T) {
 	tmp := t.TempDir()
-	st, _ := store.NewFileStore(filepath.Join(tmp, "srv.json"))
+	st, _ := store.NewFileStore("")
 	keyDev, _ := st.CreatePreAuthKey("dev", true, false, []string{"tag:dev"}, time.Hour)
 	keyGW, _ := st.CreatePreAuthKey("gw", true, false, []string{"tag:gateway"}, time.Hour)
 

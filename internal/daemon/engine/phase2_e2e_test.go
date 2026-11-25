@@ -210,7 +210,7 @@ func (s *e2eStreamSwitch) DialFrom(host string) transport.StreamDialFunc {
 
 func TestPhase2StatefulNATHolePunchAndWSSMultiTransport(t *testing.T) {
 	tmp := t.TempDir()
-	st, _ := store.NewFileStore(filepath.Join(tmp, "srv.json"))
+	st, _ := store.NewFileStore("")
 	pak, _ := st.CreatePreAuthKey("p2", true, false, nil, time.Hour)
 
 	inet := newNATInternet()

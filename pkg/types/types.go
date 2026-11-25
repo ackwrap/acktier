@@ -25,11 +25,31 @@ type Endpoint struct {
 	IsLAN bool           `json:"isLan,omitempty"`
 }
 
-// PeerLink reports a verified direct L4/L7 link and smoothed RTT from a node to a neighbor peer.
+// RelayMode controls whether a node acts as a peer-to-peer ciphertext relay (stepping-stone) for other nodes.
+type RelayMode string
+
+const (
+	RelayModeAuto RelayMode = "auto" // Default: auto-enable CanRelay when public IP / open-public STUN / UPnP is detected
+	RelayModeOn   RelayMode = "on"   // Force enable peer relay regardless of NAT type
+	RelayModeOff  RelayMode = "off"  // Never relay transit traffic for other peers (e.g. metered VPS)
+)
+
+// PeerLink reports a verified direct L4/L7 link, smoothed RTT, jitter, and packet loss rate to a neighbor peer.
 type PeerLink struct {
-	Target    PublicKey      `json:"target"`
-	RTTMillis float64        `json:"rttMillis"`
-	Proto     TransportProto `json:"proto,omitempty"`
+	Target       PublicKey      `json:"target"`
+	RTTMillis    float64        `json:"rttMillis"`
+	JitterMillis float64        `json:"jitterMillis,omitempty"`
+	LossRate     float64        `json:"lossRate,omitempty"` // 0.0 .. 1.0
+	Proto        TransportProto `json:"proto,omitempty"`
+}
+
+// EffectiveCostMs computes the quality-adjusted link cost in ms (penalizing jitter and packet loss).
+func (pl PeerLink) EffectiveCostMs() float64 {
+	rtt := pl.RTTMillis
+	if rtt <= 0 {
+		rtt = 10.0
+	}
+	return rtt + 2.0*pl.JitterMillis + 300.0*pl.LossRate
 }
 
 // PeerNode represents a device in the AckTier overlay network.

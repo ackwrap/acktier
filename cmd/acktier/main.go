@@ -84,7 +84,9 @@ func runUp(apiBase string, args []string) {
 	routesCSV := fs.String("advertise-routes", "", "Comma-separated subnet CIDRs to advertise")
 	advExit := fs.Bool("advertise-exit-node", false, "Offer this node as a global Exit Node (0.0.0.0/0, ::/0)")
 	exitNode := fs.String("exit-node", "", "Select peer name or IP as global Exit Node (or 'none')")
-	canRelay := fs.Bool("can-relay", false, "Allow this node to act as a peer relay")
+	relayMode := fs.String("relay-mode", "auto", "Peer relay mode: auto (public IP auto-enables) | on | off")
+	maxRelayMbps := fs.Float64("relay-max-mbps", 0, "Optional transit relay bandwidth limit in Mbps")
+	canRelay := fs.Bool("can-relay", false, "Force enable peer relay (alias for --relay-mode=on)")
 	_ = fs.Parse(args)
 
 	var routes []netip.Prefix
@@ -108,6 +110,8 @@ func runUp(apiBase string, args []string) {
 		Hostname:         *hostname,
 		AdvertisedRoutes: routes,
 		ExitNode:         *exitNode,
+		RelayMode:        types.RelayMode(*relayMode),
+		MaxRelayMbps:     *maxRelayMbps,
 		CanRelay:         *canRelay,
 	})
 	if err != nil {
@@ -143,7 +147,8 @@ func runStatus(apiBase string, args []string) {
 		return
 	}
 
-	fmt.Printf("State: %s | TUN: %s | NAT: %s | Relay Connected: %v\n", st.State, st.TUNName, st.NATType, st.RelayConnected)
+	fmt.Printf("State: %s | TUN: %s | NAT: %s | AutoRelay: %v (%s) | Relay Connected: %v\n",
+		st.State, st.TUNName, st.NATType, st.CanRelay, st.RelayMode, st.RelayConnected)
 	if st.IPv4 != "" {
 		fmt.Printf("Self : %-15s %-20s (%s)\n\n", st.IPv4, st.SelfName, st.SelfNodeKey)
 	}

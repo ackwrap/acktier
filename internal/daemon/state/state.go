@@ -20,6 +20,8 @@ type ConfigState struct {
 	Hostname         string           `json:"hostname,omitempty"`
 	AdvertisedRoutes []netip.Prefix   `json:"advertisedRoutes,omitempty"`
 	ExitNode         string           `json:"exitNode,omitempty"`
+	RelayMode        types.RelayMode  `json:"relayMode,omitempty"` // "auto" (default) | "on" | "off"
+	MaxRelayMbps     float64          `json:"maxRelayMbps,omitempty"`
 	CanRelay         bool             `json:"canRelay,omitempty"`
 	WantRunning      bool             `json:"wantRunning,omitempty"`
 }

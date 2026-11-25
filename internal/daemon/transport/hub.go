@@ -100,7 +100,7 @@ func (h *Hub) LocalEndpoints(excludeIfName string, extraPublic []types.Endpoint)
 			add(types.Endpoint{
 				Proto: d.Proto(),
 				Addr:  net.JoinHostPort(ip.String(), port),
-				IsLAN: true,
+				IsLAN: ip.IsPrivate(),
 			})
 		}
 	}

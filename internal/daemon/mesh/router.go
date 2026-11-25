@@ -30,17 +30,19 @@ type edge struct {
 
 // Router computes loop-free shortest-delay multi-hop routes across CanRelay-enabled mesh peers using Dijkstra.
 type Router struct {
-	mu      sync.RWMutex
-	selfKey types.PublicKey
-	routes  map[types.PublicKey]Route
-	names   map[types.PublicKey]string
+	mu          sync.RWMutex
+	selfKey     types.PublicKey
+	routes      map[types.PublicKey]Route
+	relayRoutes map[types.PublicKey]Route // Best stepping-stone route with len(Hops) >= 2
+	names       map[types.PublicKey]string
 }
 
 func NewRouter(selfKey types.PublicKey) *Router {
 	return &Router{
-		selfKey: selfKey,
-		routes:  make(map[types.PublicKey]Route),
-		names:   make(map[types.PublicKey]string),
+		selfKey:     selfKey,
+		routes:      make(map[types.PublicKey]Route),
+		relayRoutes: make(map[types.PublicKey]Route),
+		names:       make(map[types.PublicKey]string),
 	}
 }
 
@@ -82,10 +84,27 @@ func (r *Router) Recompute(selfDirect []types.PeerLink, peers []types.PeerNode) 
 		adj[u] = append(adj[u], edge{to: v, costMs: rttMs})
 	}
 
-	// 1. Add Self's live verified direct links
+	// Build lookup of peer-reported cost back to Self so asymmetric uncalibrated links inherit known path loss!
+	peerCostToSelf := make(map[types.PublicKey]float64)
+	for _, p := range peers {
+		if !p.Online {
+			continue
+		}
+		for _, lk := range p.Links {
+			if lk.Target == r.selfKey {
+				peerCostToSelf[p.NodeKey] = lk.EffectiveCostMs()
+			}
+		}
+	}
+
+	// 1. Add Self's live verified direct links (weighted by max of Self & Peer quality-adjusted cost!)
 	for _, lk := range selfDirect {
 		if peerOnline[lk.Target] {
-			addDirectedEdge(r.selfKey, lk.Target, lk.RTTMillis)
+			cost := lk.EffectiveCostMs()
+			if revCost := peerCostToSelf[lk.Target]; revCost > cost {
+				cost = revCost
+			}
+			addDirectedEdge(r.selfKey, lk.Target, cost)
 		}
 	}
 
@@ -100,8 +119,12 @@ func (r *Router) Recompute(selfDirect []types.PeerLink, peers []types.PeerNode) 
 			if lk.Target != r.selfKey && !peerOnline[lk.Target] {
 				continue
 			}
-			addDirectedEdge(p.NodeKey, lk.Target, lk.RTTMillis)
-			addDirectedEdge(lk.Target, p.NodeKey, lk.RTTMillis)
+			cost := lk.EffectiveCostMs()
+			addDirectedEdge(p.NodeKey, lk.Target, cost)
+			// Never let a remote peer's report forge or override Self's own outbound direct link measurement!
+			if lk.Target != r.selfKey {
+				addDirectedEdge(lk.Target, p.NodeKey, cost)
+			}
 		}
 	}
 
@@ -112,6 +135,8 @@ func (r *Router) Recompute(selfDirect []types.PeerLink, peers []types.PeerNode) 
 	}
 	bestDist := make(map[types.PublicKey]float64, len(peers)+1)
 	bestPath := make(map[types.PublicKey][]types.PublicKey, len(peers))
+	bestRelayDist := make(map[types.PublicKey]float64, len(peers))
+	bestRelayPath := make(map[types.PublicKey][]types.PublicKey, len(peers))
 	bestDist[r.selfKey] = 0
 
 	pq := &dijkstraHeap{{node: r.selfKey, cost: 0, path: nil}}
@@ -154,6 +179,12 @@ func (r *Router) Recompute(selfDirect []types.PeerLink, peers []types.PeerNode) 
 				bestDist[e.to] = newCost
 				bestPath[e.to] = newPath
 			}
+			if nextHops >= 2 {
+				if prevRelayBest, ok := bestRelayDist[e.to]; !ok || newCost < prevRelayBest {
+					bestRelayDist[e.to] = newCost
+					bestRelayPath[e.to] = newPath
+				}
+			}
 
 			if nextHops < MaxMeshHops && canTransit[e.to] {
 				heap.Push(pq, dijkstraItem{
@@ -179,8 +210,22 @@ func (r *Router) Recompute(selfDirect []types.PeerLink, peers []types.PeerNode) 
 		}
 	}
 
+	computedRelay := make(map[types.PublicKey]Route, len(bestRelayPath))
+	for dst, path := range bestRelayPath {
+		if len(path) >= 2 {
+			computedRelay[dst] = Route{
+				Destination:   dst,
+				NextHop:       path[0],
+				Hops:          path,
+				TotalCostMs:   math.Round(bestRelayDist[dst]*100) / 100,
+				IsPeerRelayed: true,
+			}
+		}
+	}
+
 	r.mu.Lock()
 	r.routes = computed
+	r.relayRoutes = computedRelay
 	r.names = names
 	r.mu.Unlock()
 }
@@ -190,6 +235,14 @@ func (r *Router) Lookup(dst types.PublicKey) (Route, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	rt, ok := r.routes[dst]
+	return rt, ok
+}
+
+// LookupRelay returns the lowest-cost multi-hop Peer-Relay stepping-stone route (len(Hops) >= 2) to dst.
+func (r *Router) LookupRelay(dst types.PublicKey) (Route, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rt, ok := r.relayRoutes[dst]
 	return rt, ok
 }
 

@@ -30,6 +30,8 @@ type Server struct {
 	StateDir string
 
 	CanRelay           bool
+	RelayMode          types.RelayMode // "auto" (default) | "on" | "off"
+	MaxRelayMbps       float64         // Optional transit bandwidth cap in Mbps
 	AdvertisedRoutes   []netip.Prefix
 	ExitNode           string
 	EnableUPnP         bool
@@ -130,6 +132,8 @@ func (s *Server) Up(ctx context.Context) (*types.NetMap, error) {
 		Hostname:         s.Hostname,
 		AdvertisedRoutes: s.AdvertisedRoutes,
 		ExitNode:         s.ExitNode,
+		RelayMode:        s.RelayMode,
+		MaxRelayMbps:     s.MaxRelayMbps,
 		CanRelay:         s.CanRelay,
 	}
 	s.mu.Unlock()
