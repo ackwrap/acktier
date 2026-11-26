@@ -19,10 +19,10 @@
 本机验证可直接启动，无需预先指定公钥：
 
 ```bash
-acktier-server -listen 127.0.0.1:8080 -stun= -stun-alt=
+acktier-server -listen 127.0.0.1:8080 -admin-listen 127.0.0.1:8081 -stun= -stun-alt=
 ```
 
-打开 [http://127.0.0.1:8080/admin/](http://127.0.0.1:8080/admin/)，用中心的 `AdminToken` 登录。自动生成的令牌可在 `./data/server-credentials.json`（或 `-credentials-file` 指定的文件）中找到。远程使用 Web 管理台请在中心配置 HTTPS；非回环的明文 HTTP 不允许登录。
+打开 [http://127.0.0.1:8081/admin/](http://127.0.0.1:8081/admin/)，用中心独立的 Web 管理员密码登录。首次自动生成的密码写入私有文件 `./data/server-credentials.json` 的 `adminPassword`，数据库只保存 Argon2id 哈希。忘记密码时，**先停止中心**，在本机以相同的 `-data` 参数执行 `acktier-server reset-password`，再启动；运行中的 SQLite 库会拒绝离线重置。Web 管理台与管理 API 默认只在 `-admin-listen`（回环）监听，普通节点端口 `-listen` 不暴露 `/admin/` 或管理路由；远程访问管理台建议经 SSH 隧道，或显式为 `-admin-listen` 配置 HTTPS。
 
 在选定的客户端电脑执行：
 
@@ -57,9 +57,11 @@ acktier up --server http://127.0.0.1:8080 --auth-key "<PRE_AUTH_KEY>" --hostname
 
 ### 3. 所有者检查、签发，中心分发
 
-在管理台的「待处理申请」查看节点公钥；也可用 `acktier owner requests --server http://127.0.0.1:8080` 查询。CLI 管理命令同样需要中心管理令牌，可通过受保护的 `ACKTIER_ADMIN_TOKEN` 环境变量提供。
+在管理台的「入网申请」查看节点公钥、传输能力与申报路由，核对后可一键加入「ACL 与策略草稿」并导出完整 `policy.json`。如显式开启控制端 API 委托（在所有者电脑执行 `acktier owner controller-init --dir ./data/owner` 并在管理台「申请码与安全」上传 `controller-trust.json`），也可用 `acktier owner requests --server http://127.0.0.1:8081 --dir ./data/owner` 通过一次性挑战签名查询。
 
-列表是**中心提供的未核验信息**。在签发前，必须通过节点本机显示的公钥或另一可信渠道确认公钥归属，不能按名称盲签。所有者准备完整 `policy.json`，例如（替换两个公钥占位符）：
+从当前签名快照新建草稿时，中心只复制能重新编译出同一快照的策略源。中心没有相符草稿时，先导入所有者签发用的完整 `policy.json`；不会用空 ACL 代替。只上传 ACL 仍只修改所选草稿，不会直接激活规则。
+
+列表是**中心提供的未核验信息**。在签发前，必须通过节点本机显示的公钥或另一可信渠道确认公钥归属，不能按名称盲签。所有者准备或从管理台导出完整 `policy.json`，例如（替换两个公钥占位符）：
 
 ```json
 {
@@ -84,10 +86,10 @@ acktier up --server http://127.0.0.1:8080 --auth-key "<PRE_AUTH_KEY>" --hostname
 acktier owner sign --dir ./data/owner --policy ./policy.json --valid-for 168h
 ```
 
-再到管理台「发布签名授权」上传 `authorization.json`。无需访问签名私钥；如果使用 CLI，也可运行：
+再到管理台「签名发布与历史」上传 `authorization.json`（支持发布前验签预览与变更对比）。无需访问签名私钥；如果已启用控制端 API 委托，也可运行：
 
 ```bash
-acktier owner publish --server http://127.0.0.1:8080 --file ./data/owner/authorization.json
+acktier owner publish --server http://127.0.0.1:8081 --dir ./data/owner --file ./data/owner/authorization.json
 ```
 
 节点首次等批准后须再跑一次 `acktier up`，通常可直接复用已保存的令牌。已在线节点会通过现有流接收新版；签名更新切换时会清理旧会话和连接跟踪，由数据面重新建立连接。每次签发会导出同公钥、最低版本更新的 `trust.json`；给**新节点**分发已成功发布版本对应的文件。
@@ -97,9 +99,17 @@ acktier owner publish --server http://127.0.0.1:8080 --file ./data/owner/authori
 - **授权数据**：快照包含组网 ID（所有者公钥 SHA-256 指纹）、版本、过期时间、完整成员表、所有者 CLI 编译的包过滤表及 DNS/STUN 配置。Ed25519 对带 AckTier 专用前缀的原始 JSON 字节签名。网络传输中 payload 和签名是 Base64，不重新序列化后验签。
 - **连接数据**：中心分发同一个签名快照，并提供候选地址、链路质量等提示。节点只为已签名单中的公钥采用连接提示，忽略未签的授权字段。`NetMap.Revision` 只用于流同步，和所有者版本无关。
 - **防回滚**：节点在安装策略前持久化已验证的版本和摘要；需要同时满足本地最低版本。同版本不同内容或更旧版本拒绝。注册和后续 NetMap 均经过同一校验，不因缺少签名降级。
-- **中心管理 API**：`GET /api/v1/admin/owner/requests` 查看申请；`GET` / `PUT /api/v1/admin/owner/authorization` 查看、发布已签文件。管理令牌仅允许提交或查询，不提供签发能力。旧的直接换钥、ACL、路由和 DNS 修改接口在此模式下禁用。
+- **中心管理 API**：`GET /api/v1/admin/owner/requests` 查看申请；`GET` / `PUT /api/v1/admin/owner/authorization` 查看、发布已签文件。启用委托后须证明持有专用控制端密钥；不是 Web 密码、节点令牌或申请码。申请码明文只在创建时返回。旧的直接换钥、ACL、路由和 DNS 修改接口在此模式下禁用。
 - **Web 登录和初始化**：管理台登录后使用限时会话；浏览器表单有防跨站校验。首次绑定只能成功一次，无法通过 Web 更换已保存的公钥。中心不通过页面发放节点的初始信任文件。
-- **存储**：第一版沿用本地原子 JSON，不依赖 SQLite。中心保留协作状态、公钥和已签快照；节点保留信任固定及版本；只有所有者电脑保存签名私钥。后续可迁移中心存储，不改变客户端的验签边界。
+- **存储**：中心使用 SQLite，节点本地状态和所有者签名目录不迁移。数据库保留公钥、已签快照与版本、申请和节点、密码哈希、草稿、委托和审计。申请码及节点令牌仅保存校验摘要，不保存明文。
+
+## 中心存储与备份
+
+- 首次启动直接创建 `./data/center/server.sqlite`。可用 `-data /path/to/private/server.sqlite` 自定义路径；`-data=` 仅用于不持久化的临时联调。
+- 数据库须在**服务账号控制的本地私有目录**。Unix 目录和文件默认分别为 `0700` 和 `0600`；Windows 目录及子文件只允许服务账号、SYSTEM 和 Administrators。启动时会创建不存在的末级目录，但不会修改已有目录的权限。不要把库放在共享目录或让两个中心共用。
+- 停止中心后再备份数据库。如有 SQLite 日志文件也一并保留，不要手动删除恢复日志。恢复时使用最新可信备份，并核对所有者当前授权版本。必要时用可信的 `trust.json` 提高最低版本，再上传最新授权。
+
+登录后可在 Web 直接改密码。忘记密码时，停止中心，在主机上运行 `acktier-server reset-password`，再启动。若使用了自定义存储路径，重置时应传入相同的 `-data`。可用 `-admin-password-file` 提供新密码；未提供时随机生成，写入本机私有凭据文件。
 
 ## 失联、失陷与恢复
 

@@ -59,11 +59,12 @@ func (sub *subscriber) close() {
 
 // Server coordinates authentication, IPAM, NetMap distribution, Admin API, and Relay upgrades.
 type Server struct {
-	cfg      Config
-	store    *store.FileStore
-	ipam     *ipam.Allocator
-	relay    *relay.Server
-	revision atomic.Uint64
+	cfg        Config
+	store      *store.FileStore
+	ipam       *ipam.Allocator
+	relay      *relay.Server
+	controller *controllerAuth
+	revision   atomic.Uint64
 
 	broadcastMu sync.Mutex
 	subMu       sync.RWMutex
@@ -81,6 +82,7 @@ func NewServer(cfg Config, st *store.FileStore) *Server {
 		cfg:         cfg,
 		store:       st,
 		ipam:        alloc,
+		controller:  newControllerAuth(),
 		subscribers: make(map[uint64]*subscriber),
 	}
 	s.revision.Store(1)
@@ -106,12 +108,11 @@ func (s *Server) authenticateNodeToken(nodeKey types.PublicKey, token string) bo
 	return ok
 }
 
-// Handler serves the Web console, Admin and Node Control APIs, and `/relay` Upgrade.
+// Handler serves the Node Control Plane and `/relay` Upgrade.
+// When RequireOwner is true, Web management and `/api/v1/admin/*` are NOT mounted here
+// (they return 404 on the node listener and must be served via AdminHandler on a dedicated listener).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	if s.cfg.RequireOwner {
-		s.mountWebAdmin(mux)
-	}
 
 	// Public health check
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -128,22 +129,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/node/heartbeat", s.afterOwnerSetup(s.handleNodeHeartbeat))
 	mux.HandleFunc("GET /api/v1/node/map/stream", s.afterOwnerSetup(s.handleNodeMapStream))
 
-	// Admin API endpoints
-	mux.HandleFunc("GET /api/v1/admin/status", s.requireAdmin(s.handleAdminStatus))
-	mux.HandleFunc("GET /api/v1/admin/nodes", s.requireAdmin(s.handleAdminListNodes))
-	mux.HandleFunc("DELETE /api/v1/admin/nodes/{id}", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminDeleteNode)))
-	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rekey", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminRekeyNode)))
-	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rename", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminRenameNode)))
-	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/routes/approve", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminApproveRoutes)))
-	mux.HandleFunc("GET /api/v1/admin/keys", s.requireAdmin(s.handleAdminListKeys))
-	mux.HandleFunc("POST /api/v1/admin/keys", s.requireAdmin(s.handleAdminCreateKey))
-	mux.HandleFunc("DELETE /api/v1/admin/keys/{id}", s.requireAdmin(s.handleAdminRevokeKey))
-	mux.HandleFunc("GET /api/v1/admin/acl", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminGetACL)))
-	mux.HandleFunc("PUT /api/v1/admin/acl", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminPutACL)))
-	mux.HandleFunc("PUT /api/v1/admin/dns", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminPutDNS)))
-	mux.HandleFunc("GET /api/v1/admin/owner/requests", s.requireAdmin(s.handleOwnerRequests))
-	mux.HandleFunc("PUT /api/v1/admin/owner/authorization", s.requireAdmin(s.handleOwnerPublication))
-	mux.HandleFunc("GET /api/v1/admin/owner/authorization", s.requireAdmin(s.handleGetOwnerPublication))
+	if !s.cfg.RequireOwner {
+		// Legacy / non-owner test mode Admin API endpoints
+		mux.HandleFunc("GET /api/v1/admin/status", s.requireAdmin(s.handleAdminStatus))
+		mux.HandleFunc("GET /api/v1/admin/nodes", s.requireAdmin(s.handleAdminListNodes))
+		mux.HandleFunc("DELETE /api/v1/admin/nodes/{id}", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminDeleteNode)))
+		mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rekey", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminRekeyNode)))
+		mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rename", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminRenameNode)))
+		mux.HandleFunc("POST /api/v1/admin/nodes/{id}/routes/approve", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminApproveRoutes)))
+		mux.HandleFunc("GET /api/v1/admin/keys", s.requireAdmin(s.handleAdminListKeys))
+		mux.HandleFunc("POST /api/v1/admin/keys", s.requireAdmin(s.handleAdminCreateKey))
+		mux.HandleFunc("DELETE /api/v1/admin/keys/{id}", s.requireAdmin(s.handleAdminRevokeKey))
+		mux.HandleFunc("GET /api/v1/admin/acl", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminGetACL)))
+		mux.HandleFunc("PUT /api/v1/admin/acl", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminPutACL)))
+		mux.HandleFunc("PUT /api/v1/admin/dns", s.requireAdmin(s.legacyPolicyOnly(s.handleAdminPutDNS)))
+		mux.HandleFunc("GET /api/v1/admin/owner/requests", s.requireAdmin(s.handleOwnerRequests))
+		mux.HandleFunc("PUT /api/v1/admin/owner/authorization", s.requireAdmin(s.handleOwnerPublication))
+		mux.HandleFunc("GET /api/v1/admin/owner/authorization", s.requireAdmin(s.handleGetOwnerPublication))
+	}
 
 	return mux
 }
@@ -359,6 +362,7 @@ func (s *Server) handleNodeRegister(w http.ResponseWriter, r *http.Request) {
 	if len(req.AdvertisedRoutes) > maxRoutesPerNode {
 		req.AdvertisedRoutes = req.AdvertisedRoutes[:maxRoutesPerNode]
 	}
+	req.TransportPorts = sanitizeTransportPorts(req.TransportPorts)
 	req.Endpoints = sanitizeEndpoints(req.Endpoints)
 	req.Hostname = sanitizeHostnameMeta(req.Hostname)
 	req.OS = sanitizeHostnameMeta(req.OS)
@@ -415,6 +419,7 @@ func (s *Server) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if !s.checkOwnerNetwork(w, req.OwnerNetworkID) {
 		return
 	}
+	cleanPorts := sanitizeTransportPorts(req.TransportPorts)
 	cleanEps := sanitizeEndpoints(req.Endpoints)
 	links := req.Links
 	if len(links) > maxLinksPerNode {
@@ -427,9 +432,13 @@ func (s *Server) handleNodeHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	var changed bool
 	err := s.store.UpdateAuthenticatedNode(req.NodeKey, bearer, func(node *types.PeerNode) bool {
-		changed = !node.Online || node.CanRelay != req.CanRelay ||
+		portsChanged := req.TransportPorts != nil && !transportPortsEqual(node.TransportPorts, cleanPorts)
+		changed = !node.Online || node.CanRelay != req.CanRelay || portsChanged ||
 			node.PreferredRelayID != req.PreferredRelayID ||
 			!endpointsEqual(node.Endpoints, cleanEps) || !linksMeaningfullyChanged(node.Links, links)
+		if req.TransportPorts != nil {
+			node.TransportPorts = cleanPorts
+		}
 		node.Endpoints = cleanEps
 		if links != nil {
 			node.Links = links

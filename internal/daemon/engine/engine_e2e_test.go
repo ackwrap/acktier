@@ -314,10 +314,11 @@ func TestDirectUDPContinuesThroughControlOutage(t *testing.T) {
 
 func TestEndToEndDirectUDPAndRelayFallback(t *testing.T) {
 	tmp := t.TempDir()
-	st, err := store.NewFileStore(filepath.Join(tmp, "server.json"))
+	st, err := store.NewFileStore(filepath.Join(tmp, "center", "state.sqlite"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+	defer st.Close()
 	pak, err := st.CreatePreAuthKey("e2e-key", true, false, nil, time.Hour)
 	if err != nil {
 		t.Fatalf("create key: %v", err)

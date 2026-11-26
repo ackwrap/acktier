@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>AckTier 中心管理台</title>
+  <link rel="stylesheet" href="/admin/assets/icons.css">
+  <link rel="stylesheet" href="/admin/assets/base.css">
+  <link rel="stylesheet" href="/admin/assets/components.css">
+  <script type="module" src="/admin/assets/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <!-- Unauthenticated Split Enterprise Login Shell -->
+  <div id="auth-shell" class="auth-shell" hidden>
+    <div class="auth-frame">
+      <section class="auth-showcase" aria-label="零信任架构说明">
+        <div>
+          <div class="auth-brand">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="12 2 21 7 21 17 12 22 3 17 3 7"/>
+                <circle cx="12" cy="12" r="2.6"/>
+                <path d="M12 4.6v4.8M18.4 15.7l-4.2-2.4M5.6 15.7l4.2-2.4"/>
+              </svg>
+            </span>
+            <div>
+              <div class="brand-name">AckTier Mesh Control</div>
+              <div id="auth-state-badge" class="brand-sub">零信任协调与签名分发中心</div>
+            </div>
+          </div>
+
+          <h2 class="showcase-headline">控制面无权越俎代庖，数据面只认离线根签名</h2>
+          <p class="showcase-lead">
+            中心服务器仅负责连接提示交换、策略草稿编排与已签快照验签分发，绝不生成或持有组网所有者签名私钥。
+          </p>
+        </div>
+
+        <ul class="pillar-list">
+          <li class="pillar-item">
+            <strong>所有者离线 Ed25519 签发</strong>
+            <span>成员身份、虚拟 IP、批准路由与 ACL 均由所有者客户端本地签名并附带防回滚版本号。</span>
+          </li>
+          <li class="pillar-item">
+            <strong>多协议直连与智能跳板选路</strong>
+            <span>支持 UDP / TCP / QUIC / WSS 多栈并发探测、对等跳板中继与密文兜底转发。</span>
+          </li>
+          <li class="pillar-item">
+            <strong>独立管理监听与 Argon2id 会话</strong>
+            <span>Web 管理台仅挂载于独立管理端口，与普通节点监听端口物理隔离。</span>
+          </li>
+        </ul>
+
+        <div class="showcase-foot">
+          <span>Zero-Trust Overlay SD-WAN</span>
+          <span>Strict CSP · Same-Origin Protected</span>
+        </div>
+      </section>
+
+      <div class="auth-card">
+        <div>
+          <span class="badge accent">独立管理平面</span>
+          <h1 id="login-title">管理员登录</h1>
+        </div>
+        <p id="login-subtitle" class="muted">
+          请输入中心独立的 Web 管理员密码。登录仅解锁管理台视图与草稿编排，无法绕过所有者签名直接授权节点。
+        </p>
+
+        <div id="login-alert" class="callout error icon-start" role="alert" hidden></div>
+
+        <form id="login-form" class="form-stack" method="post">
+          <div class="field">
+            <label for="current-password">管理员密码</label>
+            <div class="input-group">
+              <input
+                type="password"
+                id="current-password"
+                name="password"
+                autocomplete="current-password"
+                enterkeyhint="done"
+                maxlength="256"
+                placeholder="输入中心 Web 管理员密码"
+                required
+              >
+              <button type="button" id="toggle-pw-btn" class="btn ghost sm btn-eye icon-start" aria-label="显示密码" aria-pressed="false">显示</button>
+            </div>
+            <p class="field-hint">首次初始密码保存在中心主机私有文件 <code>server-credentials.json</code>。如需重置，请停止中心后执行 <code>acktier-server reset-password</code>。</p>
+          </div>
+          <button type="submit" id="login-submit" class="btn primary full">登录中心管理台</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- First-Run Owner Binding Wizard Shell -->
+  <div id="setup-shell" class="setup-shell" hidden>
+    <header class="setup-topbar">
+      <div class="auth-brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 21 7 21 17 12 22 3 17 3 7"/>
+            <circle cx="12" cy="12" r="2.6"/>
+            <path d="M12 4.6v4.8M18.4 15.7l-4.2-2.4M5.6 15.7l4.2-2.4"/>
+          </svg>
+        </span>
+        <div>
+          <div class="brand-name">AckTier 首次初始化向导</div>
+          <div class="brand-sub">状态：待绑定所有者公钥（节点入网与中继已暂停）</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button type="button" id="setup-theme-btn" class="btn ghost sm btn-theme icon-start" aria-label="切换深浅色主题">主题</button>
+        <button type="button" id="setup-logout-btn" class="btn secondary sm btn-logout icon-start">退出登录</button>
+      </div>
+    </header>
+
+    <main class="setup-main">
+      <section class="card setup-card" aria-labelledby="setup-heading">
+        <div class="toolbar-row between">
+          <span class="badge warn icon-start">等待初始化 · 仅允许单次绑定</span>
+          <span class="mono muted">Root of Trust Pinning</span>
+        </div>
+        <h1 id="setup-heading">绑定所选的所有者客户端公钥</h1>
+        <p class="muted">
+          请明确选定一台受信任的日常电脑作为组网所有者（控制端）。签名私钥永久保存在该电脑本地；中心仅绑定公开导出的 <code>trust.json</code>。
+        </p>
+
+        <ol class="wizard-steps">
+          <li>
+            <span class="step-num">STEP 01</span>
+            <strong>本地初始化根密钥</strong>
+            <p class="muted">在所有者电脑执行 <code>acktier owner init --dir ./data/owner</code>，离线保管好 <code>signer.json</code>。</p>
+          </li>
+          <li>
+            <span class="step-num">STEP 02</span>
+            <strong>上传并核对组网指纹</strong>
+            <p class="muted">在下方选择公开的 <code>trust.json</code>（切勿选择私钥文件），核对 SHA-256 组网指纹。</p>
+          </li>
+          <li>
+            <span class="step-num">STEP 03</span>
+            <strong>锁定信任根并开放协调</strong>
+            <p class="muted">持久化后立即开放申请接收；Web 管理台无权覆盖或更换已绑定的所有者根密钥。</p>
+          </li>
+        </ol>
+
+        <div id="setup-alert" class="callout error icon-start" role="alert" hidden></div>
+
+        <form id="setup-form" class="form-stack">
+          <div class="field">
+            <label for="trust-file-input">所有者公开信任文件 <code>trust.json</code></label>
+            <div id="trust-dropzone" class="dropzone">
+              <input type="file" id="trust-file-input" accept=".json,application/json" aria-describedby="setup-alert" required>
+              <span class="dropzone-glyph icon" aria-hidden="true"></span>
+              <div class="dropzone-copy">
+                <span id="trust-file-title" class="dropzone-title">点击选择或拖拽 trust.json 到此处</span>
+                <span id="trust-file-sub" class="dropzone-sub">仅接受公开信任配置（上限 16 KiB），浏览器将在本地先行拦截任何私钥文件</span>
+              </div>
+            </div>
+          </div>
+
+          <div id="trust-preview-box" class="preview-card" hidden>
+            <div class="preview-header">
+              <span class="badge ok icon-start">格式校验通过 · 公开信任根预览</span>
+            </div>
+            <dl class="kv-grid">
+              <div>
+                <dt>组网指纹 (Network ID)</dt>
+                <dd><code id="preview-netid" class="mono breakable"></code></dd>
+              </div>
+              <div>
+                <dt>所有者 Ed25519 公钥</dt>
+                <dd><code id="preview-pubkey" class="mono breakable"></code></dd>
+              </div>
+              <div>
+                <dt>最低可接受授权版本</dt>
+                <dd><code id="preview-minver" class="mono"></code></dd>
+              </div>
+            </dl>
+          </div>
+
+          <label class="checkbox-row" for="setup-confirm-check">
+            <input type="checkbox" id="setup-confirm-check" required disabled>
+            <span>我已通过可信渠道核对上述组网指纹，确认该 <code>trust.json</code> 来自我选定的所有者客户端（且未上传私钥）。</span>
+          </label>
+
+          <div class="form-actions">
+            <button type="submit" id="setup-submit-btn" class="btn primary btn-check icon-start" disabled>确认绑定所有者</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <!-- Main Authenticated Console Shell -->
+  <div id="app-shell" class="app-shell" hidden>
+    <aside class="sidebar" aria-label="主导航">
+      <div class="sidebar-brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 21 7 21 17 12 22 3 17 3 7"/>
+            <circle cx="12" cy="12" r="2.6"/>
+            <path d="M12 4.6v4.8M18.4 15.7l-4.2-2.4M5.6 15.7l4.2-2.4"/>
+          </svg>
+        </span>
+        <div>
+          <div class="brand-name">AckTier</div>
+          <div class="brand-sub">中心协调管理台</div>
+        </div>
+      </div>
+
+      <nav class="nav-list" aria-label="功能页面">
+        <div class="nav-group-label">网络态势与设备</div>
+        <a href="#overview" data-route="overview" class="nav-item" aria-current="page">
+          <span class="nav-label icon-start">概览与拓扑</span>
+        </a>
+        <a href="#requests" data-route="requests" class="nav-item">
+          <span class="nav-label icon-start">入网申请</span>
+          <span id="nav-badge-requests" class="nav-pill" hidden>0</span>
+        </a>
+        <a href="#nodes" data-route="nodes" class="nav-item">
+          <span class="nav-label icon-start">节点与能力对照</span>
+        </a>
+
+        <div class="nav-group-label">策略编排与发布</div>
+        <a href="#policy" data-route="policy" class="nav-item">
+          <span class="nav-label icon-start">ACL 与策略草稿</span>
+          <span id="nav-badge-drafts" class="nav-pill subtle" hidden>0</span>
+        </a>
+        <a href="#publish" data-route="publish" class="nav-item">
+          <span class="nav-label icon-start">签名发布与历史</span>
+        </a>
+
+        <div class="nav-group-label">安全与治理</div>
+        <a href="#security" data-route="security" class="nav-item">
+          <span class="nav-label icon-start">申请码与安全</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="trust-note">
+          <strong><span class="trust-glyph icon" aria-hidden="true"></span>零信任权限边界</strong>
+          <span>中心仅作协调与验签分发，不持有所有者签名私钥。</span>
+        </div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-status">
+          <span class="badge ok icon-start">所有者已绑定</span>
+          <span class="net-chip">
+            <span class="muted">组网</span>
+            <code id="top-network-id" class="mono">—</code>
+            <span class="copy">
+              <button type="button" class="copy-button icon-start" command="--copy" commandfor="top-network-id" aria-label="复制组网指纹">复制</button>
+              <span class="tip" role="status"></span>
+            </span>
+          </span>
+          <span id="top-auth-pill" class="badge neutral">尚未发布授权</span>
+        </div>
+
+        <div class="topbar-actions">
+          <button type="button" id="refresh-view-btn" class="btn ghost sm btn-refresh icon-start">刷新</button>
+          <button type="button" id="theme-toggle-btn" class="btn ghost sm btn-theme icon-start" aria-label="切换深浅色主题">主题</button>
+          <button type="button" id="logout-btn" class="btn secondary sm btn-logout icon-start">退出</button>
+        </div>
+      </header>
+
+      <main id="main-content" class="content" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <!-- Shared Modal Dialog (native top-layer <dialog>) -->
+  <dialog id="modal-dialog" closedby="any" aria-labelledby="modal-title">
+    <div class="dialog-header">
+      <h1 id="modal-title" class="dialog-title">对话框</h1>
+      <button type="button" id="modal-close-btn" class="btn ghost sm btn-close icon-start" aria-label="关闭窗口">关闭</button>
+    </div>
+    <div id="modal-body" class="dialog-body"></div>
+  </dialog>
+
+  <!-- Non-blocking Toast Live Region -->
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+</body>
+</html>

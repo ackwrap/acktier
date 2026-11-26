@@ -292,6 +292,18 @@ func (e *Engine) collectLocalEndpoints() []types.Endpoint {
 	return filtered
 }
 
+func (e *Engine) collectLocalTransportPorts() types.TransportPorts {
+	ports := e.hub.LocalPortNums()
+	if e.disableUDP && ports != nil {
+		delete(ports, types.ProtoUDP)
+		delete(ports, types.ProtoQUIC)
+		if len(ports) == 0 {
+			return nil
+		}
+	}
+	return ports
+}
+
 func (e *Engine) recordPendingSTUN(probeID uint64, serverAddr string) {
 	now := time.Now()
 	e.stunMu.Lock()

@@ -51,6 +51,31 @@ func (s *Server) legacyPolicyOnly(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func sanitizeTransportPorts(in types.TransportPorts) types.TransportPorts {
+	var out types.TransportPorts
+	for _, proto := range []types.TransportProto{types.ProtoUDP, types.ProtoTCP, types.ProtoQUIC, types.ProtoWSS} {
+		if port := in[proto]; port != 0 {
+			if out == nil {
+				out = make(types.TransportPorts, 4)
+			}
+			out[proto] = port
+		}
+	}
+	return out
+}
+
+func transportPortsEqual(a, b types.TransportPorts) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // Keep a stream available to the coordination identity even after the owner
 // withdraws its membership, so it can learn the signed revocation.
 func (s *Server) buildOwnerNetMap(selfID types.NodeID, networkID string, revision uint64) (types.NetMap, bool) {
@@ -93,7 +118,8 @@ func ownerRequests(verified *owner.Verified, nodes []store.StoredNode) []types.O
 			continue
 		}
 		out = append(out, types.OwnerJoinRequest{
-			NodeKey: n.NodeKey, Hostname: n.Hostname, OS: n.OS, AdvertisedRoutes: n.AdvertisedRoutes,
+			NodeKey: n.NodeKey, Hostname: n.Hostname, OS: n.OS, LastSeen: n.LastSeen,
+			TransportPorts: n.TransportPorts, Endpoints: n.Endpoints, AdvertisedRoutes: n.AdvertisedRoutes,
 		})
 	}
 	return out
@@ -114,7 +140,8 @@ func ownerMembers(verified *owner.Verified, records []store.StoredNode) []types.
 		n := member.Peer()
 		hint := hints[n.NodeKey]
 		n.Hostname, n.OS, n.Online, n.LastSeen = hint.Hostname, hint.OS, hint.Online, hint.LastSeen
-		n.Endpoints, n.CanRelay = hint.Endpoints, hint.CanRelay
+		n.Endpoints, n.Links, n.CanRelay = hint.Endpoints, hint.Links, hint.CanRelay
+		n.TransportPorts, n.AdvertisedRoutes = hint.TransportPorts, hint.AdvertisedRoutes
 		out = append(out, n)
 	}
 	return out
@@ -130,13 +157,25 @@ func (s *Server) handleGetOwnerPublication(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleOwnerPublication(w http.ResponseWriter, r *http.Request) {
+	s.serveOwnerPublication(w, r, "")
+}
+
+func (s *Server) serveOwnerPublication(w http.ResponseWriter, r *http.Request, actor string) {
 	var env types.OwnerAuthorization
 	body := http.MaxBytesReader(w, r.Body, owner.MaxEnvelope)
 	if err := owner.DecodeJSON(body, &env); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or oversized owner authorization")
 		return
 	}
-	version, err := s.publishOwner(env)
+	var audit []store.AuditEntry
+	if actor != "" {
+		audit = []store.AuditEntry{{Actor: actor, Action: "authorization.publish", Result: "success"}}
+	}
+	version, err := s.publishOwner(env, audit...)
+	if err != nil && actor != "" {
+		_, code, _ := explainPublishError(err)
+		s.audit(actor, "authorization.publish", "", "failure", code)
+	}
 	switch {
 	case errors.Is(err, owner.ErrRollback), errors.Is(err, store.ErrOwnerNotConfigured):
 		writeError(w, http.StatusConflict, err.Error())
@@ -151,8 +190,8 @@ func (s *Server) handleOwnerPublication(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]uint64{"version": version})
 }
 
-func (s *Server) publishOwner(env types.OwnerAuthorization) (uint64, error) {
-	version, removed, err := s.store.PublishOwner(env, time.Now())
+func (s *Server) publishOwner(env types.OwnerAuthorization, audit ...store.AuditEntry) (uint64, error) {
+	version, removed, err := s.store.PublishOwner(env, time.Now(), audit...)
 	if err != nil {
 		return 0, err
 	}

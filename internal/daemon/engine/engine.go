@@ -350,6 +350,7 @@ func (e *Engine) Up(ctx context.Context, req UpRequest) (*types.NetMap, error) {
 		AuthKey:          strings.TrimSpace(req.AuthKey),
 		Hostname:         hostname,
 		OS:               runtime.GOOS,
+		TransportPorts:   e.collectLocalTransportPorts(),
 		Endpoints:        endpoints,
 		AdvertisedRoutes: routes,
 		CanRelay:         canRelay,

@@ -14,15 +14,17 @@ import (
 	"github.com/acktier/acktier/internal/daemon/state"
 	"github.com/acktier/acktier/internal/owner"
 	"github.com/acktier/acktier/internal/secfile"
-	"github.com/acktier/acktier/internal/server/acl"
+	"github.com/acktier/acktier/pkg/client"
 	"github.com/acktier/acktier/pkg/types"
 )
 
 const (
-	defaultOwnerDir = "./data/owner"
-	signerFile      = "signer.json"
-	trustFile       = "trust.json"
-	publicationFile = "authorization.json"
+	defaultOwnerDir       = "./data/owner"
+	signerFile            = "signer.json"
+	trustFile             = "trust.json"
+	publicationFile       = "authorization.json"
+	controllerSignerFile  = "controller-signer.json"
+	controllerTrustFile   = "controller-trust.json"
 )
 
 type localSigner struct {
@@ -30,17 +32,11 @@ type localSigner struct {
 	LastVersion uint64 `json:"lastVersion"`
 }
 
-type ownerPolicy struct {
-	Members     []owner.Member  `json:"members"`
-	ACL         types.ACLPolicy `json:"acl"`
-	DNS         types.DNSConfig `json:"dns"`
-	STUNAddr    string          `json:"stunAddr,omitempty"`
-	STUNAltAddr string          `json:"stunAltAddr,omitempty"`
-}
+type ownerPolicy = owner.Policy
 
 func runOwner(args []string) {
 	if len(args) == 0 {
-		fatalf("usage: acktier owner init|node-key|requests|sign|publish [flags]")
+		fatalf("usage: acktier owner init|controller-init|node-key|requests|sign|publish [flags]")
 	}
 	fs := flag.NewFlagSet("owner "+args[0], flag.ExitOnError)
 	switch args[0] {
@@ -52,6 +48,15 @@ func runOwner(args []string) {
 		}
 		fmt.Printf("Owner initialized. Import %s in the center's /admin/ and provision it on nodes. Keep %s local.\n",
 			filepath.Join(*dir, trustFile), filepath.Join(*dir, signerFile))
+	case "controller-init":
+		dir := fs.String("dir", defaultOwnerDir, "Existing local owner directory containing trust.json")
+		label := fs.String("label", "owner-controller", "Label shown in the center console")
+		parseOwnerFlags(fs, args[1:])
+		if err := initController(*dir, *label); err != nil {
+			fatalf("initialize controller credential: %v", err)
+		}
+		fmt.Printf("Controller API key generated. Upload %s in /admin/ (Security -> API Delegation) and keep %s local.\n",
+			filepath.Join(*dir, controllerTrustFile), filepath.Join(*dir, controllerSignerFile))
 	case "node-key":
 		path := fs.String("state", "./data/acktierd-state.json", "The local daemon's persistent state path")
 		parseOwnerFlags(fs, args[1:])
@@ -77,16 +82,39 @@ func runOwner(args []string) {
 		}
 		fmt.Printf("Signed authorization v%d: %s\n", version, filepath.Join(*dir, publicationFile))
 	case "requests", "publish":
-		server := fs.String("server", "http://127.0.0.1:8080", "Control server URL")
-		token := fs.String("admin-token", os.Getenv("ACKTIER_ADMIN_TOKEN"), "Coordination API bearer token")
+		server := fs.String("server", "http://127.0.0.1:8081", "Center management URL (-admin-listen)")
+		dir := fs.String("dir", defaultOwnerDir, "Local owner directory containing controller-signer.json and trust.json")
+		token := fs.String("admin-token", os.Getenv("ACKTIER_ADMIN_TOKEN"), "Legacy non-owner AdminToken fallback")
 		tlsCA := fs.String("tls-ca", os.Getenv("ACKTIER_TLS_CA"), "Optional TLS CA PEM file")
 		var path *string
 		if args[0] == "publish" {
 			path = fs.String("file", defaultOwnerDir+"/"+publicationFile, "Previously signed authorization envelope")
 		}
 		parseOwnerFlags(fs, args[1:])
-		ac := buildAdminClient(*server, *token, *tlsCA, false)
 		ctx := context.Background()
+		if cc, ok := tryBuildControllerClient(*server, *dir, *tlsCA); ok {
+			if path == nil {
+				requests, err := cc.OwnerJoinRequests(ctx)
+				if err != nil {
+					fatalf("%v", err)
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(requests)
+				return
+			}
+			var env types.OwnerAuthorization
+			if err := owner.ReadJSON(*path, owner.MaxEnvelope, &env); err != nil {
+				fatalf("read signed envelope: %v", err)
+			}
+			version, err := cc.PublishOwnerAuthorization(ctx, env)
+			if err != nil {
+				fatalf("%v", err)
+			}
+			fmt.Printf("Published owner authorization v%d.\n", version)
+			return
+		}
+		ac := buildAdminClient(*server, *token, *tlsCA, false)
 		if path == nil {
 			requests, err := ac.OwnerJoinRequests(ctx)
 			if err != nil {
@@ -161,22 +189,12 @@ func signOwner(dir, path string, ttl time.Duration) (uint64, error) {
 	if err := owner.ReadJSON(path, owner.MaxPayload, &draft); err != nil {
 		return 0, err
 	}
-	if err := acl.Validate(draft.ACL); err != nil {
-		return 0, fmt.Errorf("invalid ACL: %w", err)
-	}
-	nodes := make([]types.PeerNode, 0, len(draft.Members))
-	for _, member := range draft.Members {
-		nodes = append(nodes, member.Peer())
-	}
-	rules := acl.CompileForNode(draft.ACL, types.PeerNode{}, nodes)
-	if len(rules) == 0 {
-		rules = []types.FilterRule{owner.DenyAll()}
-	}
 	now := time.Now().UTC()
-	env, err := owner.Sign(owner.Snapshot{
-		Version: version, ExpiresAt: now.Add(ttl), Members: draft.Members,
-		PacketFilter: rules, DNS: draft.DNS, STUNAddr: draft.STUNAddr, STUNAltAddr: draft.STUNAltAddr,
-	}, key, now)
+	snapshot, err := draft.Snapshot(version, now.Add(ttl))
+	if err != nil {
+		return 0, err
+	}
+	env, err := owner.Sign(snapshot, key, now)
 	if err != nil {
 		return 0, err
 	}
@@ -198,4 +216,43 @@ func writeOwnerFile(dir, name string, v any) error {
 		return err
 	}
 	return secfile.WritePrivate(filepath.Join(dir, name), append(raw, '\n'))
+}
+
+func initController(dir, label string) error {
+	trust, err := owner.LoadTrust(filepath.Join(dir, trustFile))
+	if err != nil {
+		return fmt.Errorf("load owner trust.json: %w", err)
+	}
+	signerPath := filepath.Join(dir, controllerSignerFile)
+	if _, err := os.Stat(signerPath); err == nil {
+		return errors.New("controller-signer.json already exists; remove it explicitly to rotate")
+	}
+	_, key, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return err
+	}
+	ct, err := owner.NewControllerTrust(trust, key, label)
+	if err != nil {
+		return err
+	}
+	if err := writeOwnerFile(dir, controllerSignerFile, localSigner{Seed: key.Seed()}); err != nil {
+		return err
+	}
+	return writeOwnerFile(dir, controllerTrustFile, ct)
+}
+
+func tryBuildControllerClient(serverURL, dir, tlsCA string) (*client.ControllerClient, bool) {
+	var cs localSigner
+	if err := owner.ReadJSON(filepath.Join(dir, controllerSignerFile), 4096, &cs); err != nil || len(cs.Seed) != ed25519.SeedSize {
+		return nil, false
+	}
+	trust, err := owner.LoadTrust(filepath.Join(dir, trustFile))
+	if err != nil {
+		return nil, false
+	}
+	cc := client.NewControllerClient(serverURL, trust.NetworkID(), ed25519.NewKeyFromSeed(cs.Seed), nil)
+	if err := cc.ConfigureTLS(tlsCA); err != nil {
+		fatalf("%v", err)
+	}
+	return cc, true
 }

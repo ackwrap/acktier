@@ -2,19 +2,17 @@ package store
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
-	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/acktier/acktier/internal/secfile"
 	"github.com/acktier/acktier/pkg/types"
 )
 
@@ -35,72 +33,66 @@ var reservedDNSLabels = map[string]bool{
 	"magicdns":  true,
 }
 
-// StoredNode wraps PeerNode with server-side authentication secret token.
+// StoredNode carries coordination state. NodeToken is returned on registration
+// or rekey, never serialized by the store.
 type StoredNode struct {
 	Node      types.PeerNode `json:"node"`
-	NodeToken string         `json:"nodeToken"`
+	NodeToken string         `json:"-"`
+	TokenHash string         `json:"nodeTokenHash"`
+}
+
+type storedAuthKey struct {
+	types.PreAuthKey
+	KeyHash string `json:"keyHash"`
 }
 
 type snapshot struct {
-	NextNodeID  types.NodeID                `json:"nextNodeId"`
-	Nodes       map[types.NodeID]StoredNode `json:"nodes"`
-	PreAuthKeys map[string]types.PreAuthKey `json:"preAuthKeys"`
-	RetiredKeys map[string]bool             `json:"retiredNodeKeys,omitempty"`
-	ACLPolicy   types.ACLPolicy             `json:"aclPolicy"`
-	FilterRules []types.FilterRule          `json:"filterRules,omitempty"`
-	DNS         types.DNSConfig             `json:"dns"`
-	Owner       *storedOwner                `json:"owner,omitempty"`
+	NextNodeID  types.NodeID
+	Nodes       map[types.NodeID]StoredNode
+	PreAuthKeys map[string]storedAuthKey
+	RetiredKeys map[string]bool
+	ACLPolicy   types.ACLPolicy
+	FilterRules []types.FilterRule
+	DNS         types.DNSConfig
+	Owner       *storedOwner
+
+	AdminPassword *PasswordHash
+	Delegation    *ControllerDelegation
+	Drafts        map[string]Draft
+	Publications  []PublicationRecord
+	Audit         []AuditEntry
+	Inventory     map[string]Inventory
 }
 
-// FileStore provides concurrency-safe persistent storage backed by owner-only atomic JSON snapshots.
+// FileStore coordinates mutations under one lock and persists them to SQLite
+// when a database is configured.
 type FileStore struct {
-	mu    sync.RWMutex
-	path  string
-	data  snapshot
-	owner ownerPublication
+	mu     sync.RWMutex
+	data   snapshot
+	owner  ownerPublication
+	sqlite *sqliteState
 }
 
-func NewFileStore(path string) (*FileStore, error) {
-	s := &FileStore{
-		path: path,
-		data: snapshot{
-			NextNodeID:  1,
-			Nodes:       make(map[types.NodeID]StoredNode),
-			PreAuthKeys: make(map[string]types.PreAuthKey),
-			RetiredKeys: make(map[string]bool),
-			DNS: types.DNSConfig{
-				EnableMagicDNS: true,
-				MagicDNSSuffix: "ack.internal",
-			},
+func emptySnapshot() snapshot {
+	return snapshot{
+		NextNodeID:  1,
+		Nodes:       make(map[types.NodeID]StoredNode),
+		PreAuthKeys: make(map[string]storedAuthKey),
+		RetiredKeys: make(map[string]bool),
+		DNS: types.DNSConfig{
+			EnableMagicDNS: true,
+			MagicDNSSuffix: "ack.internal",
 		},
 	}
+}
+
+// NewFileStore opens or creates an SQLite database. An empty path selects an
+// in-memory store for tests and temporary runs.
+func NewFileStore(path string) (*FileStore, error) {
 	if path == "" {
-		return s, nil
+		return &FileStore{data: emptySnapshot()}, nil
 	}
-	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-		if err := json.Unmarshal(raw, &s.data); err != nil {
-			return nil, fmt.Errorf("parse store file %s: %w", path, err)
-		}
-		if s.data.Nodes == nil {
-			s.data.Nodes = make(map[types.NodeID]StoredNode)
-		}
-		if s.data.PreAuthKeys == nil {
-			s.data.PreAuthKeys = make(map[string]types.PreAuthKey)
-		}
-		if s.data.RetiredKeys == nil {
-			s.data.RetiredKeys = make(map[string]bool)
-		}
-		if s.data.NextNodeID < 1 {
-			s.data.NextNodeID = 1
-		}
-		s.ensureUniqueNodeNamesLocked()
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	if err := s.restoreOwner(); err != nil {
-		return nil, fmt.Errorf("restore owner authorization: %w", err)
-	}
-	return s, nil
+	return openSQLite(path, false)
 }
 
 // SanitizeDNSLabel converts an arbitrary hostname into a valid RFC 1123 lowercase DNS label.
@@ -127,30 +119,6 @@ func SanitizeDNSLabel(hostname string, fallbackID types.NodeID) string {
 	return res
 }
 
-func (s *FileStore) ensureUniqueNodeNamesLocked() {
-	ids := make([]types.NodeID, 0, len(s.data.Nodes))
-	for id := range s.data.Nodes {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-
-	used := make(map[string]types.NodeID, len(ids))
-	for _, id := range ids {
-		sn := s.data.Nodes[id]
-		base := SanitizeDNSLabel(sn.Node.Name, id)
-		candidate := base
-		for suffix := 2; ; suffix++ {
-			if owner, taken := used[candidate]; !taken || owner == id {
-				break
-			}
-			candidate = fmt.Sprintf("%s-%d", base, suffix)
-		}
-		sn.Node.Name = candidate
-		used[candidate] = id
-		s.data.Nodes[id] = sn
-	}
-}
-
 func (s *FileStore) isNameTakenLocked(name string, excludeID types.NodeID) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if reservedDNSLabels[name] {
@@ -175,15 +143,11 @@ func (s *FileStore) allocateUniqueNameLocked(desiredHostname string, nodeID type
 	}
 }
 
-func (s *FileStore) saveLocked() error {
-	if s.path == "" {
-		return nil
+func (s *FileStore) saveLocked(change stateChange) error {
+	if s.sqlite != nil {
+		return s.sqlite.save(&s.data, change)
 	}
-	raw, err := json.MarshalIndent(s.data, "", "  ")
-	if err != nil {
-		return err
-	}
-	return secfile.WritePrivate(s.path, raw)
+	return nil
 }
 
 func randomHex(nBytes int) string {
@@ -205,7 +169,7 @@ func (s *FileStore) RegisterNode(req types.RegisterRequest, token string,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	existing, exists := s.findByMachineKeyLocked(req.MachineKey)
-	if exists && !tokenMatches(existing.NodeToken, token) {
+	if exists && !matchesCredential(existing.TokenHash, token) {
 		return sn, oldKey, ErrNodeAuth
 	}
 	if exists && existing.Node.KeyRevoked && existing.Node.NodeKey == req.NodeKey {
@@ -215,6 +179,8 @@ func (s *FileStore) RegisterNode(req types.RegisterRequest, token string,
 		return sn, oldKey, ErrKeyConflict
 	}
 	sn = existing
+	var change stateChange
+	var audit []AuditEntry
 	if !exists {
 		pak, keyErr := s.findPreAuthKeyLocked(req.AuthKey)
 		if keyErr != nil {
@@ -225,9 +191,14 @@ func (s *FileStore) RegisterNode(req types.RegisterRequest, token string,
 			return StoredNode{}, oldKey, allocErr
 		}
 		id := s.data.NextNodeID
+		if id == 0 || id == ^types.NodeID(0) {
+			release(v4)
+			return StoredNode{}, oldKey, errors.New("store: node ID space exhausted")
+		}
 		s.data.NextNodeID++
+		token = GenerateNodeToken()
 		sn = StoredNode{
-			NodeToken: GenerateNodeToken(),
+			TokenHash: hashCredential(token),
 			Node: types.PeerNode{
 				ID: id, Name: s.allocateUniqueNameLocked(req.Hostname, id),
 				MachineKey: req.MachineKey, IPv4: v4, IPv6: v6, Tags: pak.Tags,
@@ -237,6 +208,10 @@ func (s *FileStore) RegisterNode(req types.RegisterRequest, token string,
 		used := pak
 		used.UsedCount++
 		s.data.PreAuthKeys[pak.ID] = used
+		change.nextID, change.key = true, pak.ID
+		if s.data.Owner != nil {
+			audit = []AuditEntry{{Actor: "node", Action: "node.register", Target: req.NodeKey.String(), Result: "success", Detail: pak.ID}}
+		}
 		defer func() {
 			if err != nil {
 				s.data.NextNodeID = id
@@ -256,6 +231,9 @@ func (s *FileStore) RegisterNode(req types.RegisterRequest, token string,
 	if req.OS != "" {
 		sn.Node.OS = req.OS
 	}
+	if req.TransportPorts != nil {
+		sn.Node.TransportPorts = req.TransportPorts
+	}
 	sn.Node.Endpoints = req.Endpoints
 	if req.AdvertisedRoutes != nil {
 		sn.Node.AdvertisedRoutes = req.AdvertisedRoutes
@@ -264,12 +242,20 @@ func (s *FileStore) RegisterNode(req types.RegisterRequest, token string,
 	sn.Node.PreferredRelayID = req.PreferredRelayID
 	sn.Node.Online = true
 	sn.Node.LastSeen = time.Now().UTC()
-	err = s.saveNodeLocked(sn, oldKey)
+	err = s.saveNodeChangeLocked(sn, oldKey, change, audit...)
+	if err == nil {
+		sn.NodeToken = token
+	}
 	return sn, oldKey, err
 }
 
-func tokenMatches(want, provided string) bool {
-	return want != "" && subtle.ConstantTimeCompare([]byte(want), []byte(provided)) == 1
+func hashCredential(secret string) string {
+	digest := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(digest[:])
+}
+
+func matchesCredential(want, provided string) bool {
+	return provided != "" && subtle.ConstantTimeCompare([]byte(want), []byte(hashCredential(provided))) == 1
 }
 
 func (s *FileStore) AuthenticateNode(key types.PublicKey, token string) (StoredNode, bool) {
@@ -280,7 +266,7 @@ func (s *FileStore) AuthenticateNode(key types.PublicKey, token string) (StoredN
 
 func (s *FileStore) authenticateNodeLocked(key types.PublicKey, token string) (StoredNode, bool) {
 	sn, ok := s.findByNodeKeyLocked(key)
-	return sn, ok && !key.IsZero() && !sn.Node.KeyRevoked && tokenMatches(sn.NodeToken, token)
+	return sn, ok && !key.IsZero() && !sn.Node.KeyRevoked && matchesCredential(sn.TokenHash, token)
 }
 
 // UpdateAuthenticatedNode authorizes against the current record under the same
@@ -325,8 +311,13 @@ func (s *FileStore) RekeyNode(id types.NodeID, machineKey, nodeKey types.PublicK
 	sn.Node.Online = false
 	sn.Node.Links = nil
 	sn.Node.Endpoints = nil
-	sn.NodeToken = GenerateNodeToken()
-	return sn, oldKey, s.saveNodeLocked(sn, oldKey)
+	token := GenerateNodeToken()
+	sn.TokenHash = hashCredential(token)
+	if err := s.saveNodeLocked(sn, oldKey); err != nil {
+		return sn, oldKey, err
+	}
+	sn.NodeToken = token
+	return sn, oldKey, nil
 }
 
 func (s *FileStore) keyUnavailableLocked(key types.PublicKey, except types.NodeID) bool {
@@ -338,15 +329,21 @@ func (s *FileStore) keyUnavailableLocked(key types.PublicKey, except types.NodeI
 }
 
 func (s *FileStore) saveNodeLocked(sn StoredNode, retire types.PublicKey) error {
+	return s.saveNodeChangeLocked(sn, retire, stateChange{})
+}
+
+func (s *FileStore) saveNodeChangeLocked(sn StoredNode, retire types.PublicKey, change stateChange, audit ...AuditEntry) error {
 	id := sn.Node.ID
+	change.node = id
 	prev, existed := s.data.Nodes[id]
 	s.data.Nodes[id] = sn
 	retiredKey := retire.String()
 	alreadyRetired := s.data.RetiredKeys[retiredKey]
 	if !retire.IsZero() {
 		s.data.RetiredKeys[retiredKey] = true
+		change.retiredKey = retiredKey
 	}
-	if err := s.saveLocked(); err != nil {
+	if err := s.commitLocked(change, audit...); err != nil {
 		if existed {
 			s.data.Nodes[id] = prev
 		} else {
@@ -441,7 +438,7 @@ func (s *FileStore) DeleteNode(id types.NodeID) (StoredNode, error) {
 	retiredKey := sn.Node.NodeKey.String()
 	alreadyRetired := s.data.RetiredKeys[retiredKey]
 	s.data.RetiredKeys[retiredKey] = true
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveLocked(stateChange{node: id, retiredKey: retiredKey}); err != nil {
 		s.data.Nodes[id] = sn
 		if !alreadyRetired {
 			delete(s.data.RetiredKeys, retiredKey)
@@ -451,7 +448,7 @@ func (s *FileStore) DeleteNode(id types.NodeID) (StoredNode, error) {
 	return sn, nil
 }
 
-func (s *FileStore) CreatePreAuthKey(label string, reusable, ephemeral bool, tags []string, ttl time.Duration) (types.PreAuthKey, error) {
+func (s *FileStore) CreatePreAuthKey(label string, reusable, ephemeral bool, tags []string, ttl time.Duration, audit ...AuditEntry) (types.PreAuthKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ttl <= 0 {
@@ -473,32 +470,38 @@ func (s *FileStore) CreatePreAuthKey(label string, reusable, ephemeral bool, tag
 			break
 		}
 	}
-	s.data.PreAuthKeys[pak.ID] = pak
-	if err := s.saveLocked(); err != nil {
+	record := storedAuthKey{PreAuthKey: pak, KeyHash: hashCredential(pak.Key)}
+	record.Key = ""
+	s.data.PreAuthKeys[pak.ID] = record
+	for i := range audit {
+		audit[i].Target = pak.ID
+	}
+	if err := s.commitLocked(stateChange{key: pak.ID}, audit...); err != nil {
 		delete(s.data.PreAuthKeys, pak.ID)
 		return types.PreAuthKey{}, err
 	}
 	return pak, nil
 }
 
-func (s *FileStore) findPreAuthKeyLocked(rawKey string) (types.PreAuthKey, error) {
+func (s *FileStore) findPreAuthKeyLocked(rawKey string) (storedAuthKey, error) {
 	if rawKey == "" {
-		return types.PreAuthKey{}, ErrInvalidAuthKey
+		return storedAuthKey{}, ErrInvalidAuthKey
 	}
+	digest := []byte(hashCredential(rawKey))
 	now := time.Now().UTC()
 	for _, pak := range s.data.PreAuthKeys {
-		if !tokenMatches(pak.Key, rawKey) {
+		if subtle.ConstantTimeCompare([]byte(pak.KeyHash), digest) != 1 {
 			continue
 		}
-		if pak.Revoked || now.After(pak.ExpiresAt) {
-			return types.PreAuthKey{}, ErrInvalidAuthKey
+		if pak.Revoked || !now.Before(pak.ExpiresAt) {
+			return storedAuthKey{}, ErrInvalidAuthKey
 		}
 		if !pak.Reusable && pak.UsedCount > 0 {
-			return types.PreAuthKey{}, ErrInvalidAuthKey
+			return storedAuthKey{}, ErrInvalidAuthKey
 		}
 		return pak, nil
 	}
-	return types.PreAuthKey{}, ErrInvalidAuthKey
+	return storedAuthKey{}, ErrInvalidAuthKey
 }
 
 func (s *FileStore) ListPreAuthKeys() []types.PreAuthKey {
@@ -506,7 +509,7 @@ func (s *FileStore) ListPreAuthKeys() []types.PreAuthKey {
 	defer s.mu.RUnlock()
 	out := make([]types.PreAuthKey, 0, len(s.data.PreAuthKeys))
 	for _, k := range s.data.PreAuthKeys {
-		out = append(out, k)
+		out = append(out, k.PreAuthKey)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt.Before(out[j].CreatedAt)
@@ -514,7 +517,7 @@ func (s *FileStore) ListPreAuthKeys() []types.PreAuthKey {
 	return out
 }
 
-func (s *FileStore) RevokePreAuthKey(id string) error {
+func (s *FileStore) RevokePreAuthKey(id string, audit ...AuditEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pak, ok := s.data.PreAuthKeys[id]
@@ -524,7 +527,7 @@ func (s *FileStore) RevokePreAuthKey(id string) error {
 	next := pak
 	next.Revoked = true
 	s.data.PreAuthKeys[id] = next
-	if err := s.saveLocked(); err != nil {
+	if err := s.commitLocked(stateChange{key: id}, audit...); err != nil {
 		s.data.PreAuthKeys[id] = pak
 		return err
 	}
@@ -542,7 +545,7 @@ func (s *FileStore) SetACLPolicy(pol types.ACLPolicy) error {
 	defer s.mu.Unlock()
 	prev := s.data.ACLPolicy
 	s.data.ACLPolicy = pol
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveLocked(stateChange{unsignedPolicy: true}); err != nil {
 		s.data.ACLPolicy = prev
 		return err
 	}
@@ -554,7 +557,7 @@ func (s *FileStore) SetDNSConfig(dnsCfg types.DNSConfig) error {
 	defer s.mu.Unlock()
 	prev := s.data.DNS
 	s.data.DNS = dnsCfg
-	if err := s.saveLocked(); err != nil {
+	if err := s.saveLocked(stateChange{unsignedPolicy: true}); err != nil {
 		s.data.DNS = prev
 		return err
 	}

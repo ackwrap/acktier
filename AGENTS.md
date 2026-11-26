@@ -18,7 +18,8 @@
 - `cmd/acktierd` and `pkg/acknet` share `client.Node` and `internal/daemon/engine`. `acknet.Server` plugs in its userspace stack as a `TUNCustom` device for application sockets; `internal/daemon/netstack` is the separate subnet/exit-node gateway.
 - `pkg/types` defines the shared control messages; `pkg/protocol/wire.go` defines the binary data-plane framing. NDJSON NetMaps are full snapshots; matching keepalives renew the data-plane lease (4h by default). A silent stream reconnects after 1m without clearing data-plane state. Peer-hop framing is authenticated and distinct from center-relay framing; deploy matching node versions.
 - `internal/owner` verifies owner-signed identities and policy independently of the coordinator. Registration and streamed maps must both use the pinned owner key and persisted version; unsigned map fields are connection hints only.
-- The embedded center console is served at `/admin/` from `internal/server/control/web`. It can bind the initial public key and publish signed artifacts, but never signs. Keep its session authentication separate from the bearer-token JSON API.
+- The center uses SQLite at `./data/center/server.sqlite` by default. `-data=` is for ephemeral tests. `reset-password` needs the center stopped and the same `-data` path; the running process holds an exclusive database lock.
+- The embedded center console is served at `/admin/` from `internal/server/control/web` via `Server.AdminHandler()` on a separate loopback listener (`-admin-listen`, default `127.0.0.1:8081`); the node listener (`-listen`) returns `404` for `/admin/` and `/api/v1/admin/*` when owner mode is active. Web sessions authenticate with an Argon2id-hashed admin password (`reset-password` resets locally), while optional `/api/v1/admin/*` delegation requires per-request Ed25519 challenge signatures (`ControllerClient`). The console edits/exports unsigned drafts and publishes signed artifacts, and never signs.
 
 ## Local smoke checks
 

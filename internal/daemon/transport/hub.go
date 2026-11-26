@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 
 	"github.com/acktier/acktier/pkg/types"
@@ -64,6 +65,28 @@ func (h *Hub) LocalPorts() map[types.TransportProto]string {
 		if _, port, err := net.SplitHostPort(addr); err == nil && port != "0" && port != "" {
 			out[proto] = port
 		}
+	}
+	return out
+}
+
+// LocalPortNums returns a map of active transport protocol -> bound local port number (1-65535).
+func (h *Hub) LocalPortNums() types.TransportPorts {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var out types.TransportPorts
+	for proto, d := range h.drivers {
+		_, portStr, err := net.SplitHostPort(d.LocalAddr())
+		if err != nil {
+			continue
+		}
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p < 1 || p > 65535 {
+			continue
+		}
+		if out == nil {
+			out = make(types.TransportPorts, len(h.drivers))
+		}
+		out[proto] = uint16(p)
 	}
 	return out
 }

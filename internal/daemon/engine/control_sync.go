@@ -215,6 +215,7 @@ func (e *Engine) sendHeartbeatOnce(ctx context.Context, serverURL, token string)
 	st := e.stateMgr.Get()
 	hb := types.HeartbeatRequest{
 		NodeKey:          st.NodeKey.Public(),
+		TransportPorts:   e.collectLocalTransportPorts(),
 		Endpoints:        e.collectLocalEndpoints(),
 		Links:            e.collectDirectLinks(),
 		AdvertisedRoutes: st.AdvertisedRoutes,

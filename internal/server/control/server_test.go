@@ -44,10 +44,11 @@ func registerTestNode(t *testing.T, handler http.Handler, authKey, hostname stri
 }
 
 func TestControlRegisterAndNetMap(t *testing.T) {
-	st, err := store.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	st, err := store.NewFileStore(filepath.Join(t.TempDir(), "center", "state.sqlite"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+	defer st.Close()
 	pak, err := st.CreatePreAuthKey("test", true, false, []string{"tag:dev"}, time.Hour)
 	if err != nil {
 		t.Fatalf("create key: %v", err)

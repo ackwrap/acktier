@@ -2,7 +2,6 @@ package store_test
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -24,11 +23,12 @@ func newPublicKey(t *testing.T) types.PublicKey {
 }
 
 func TestNodeRecoveryAndRetirement(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := filepath.Join(t.TempDir(), "private", "state.sqlite")
 	st, err := store.NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer st.Close()
 	allocator := ipam.NewAllocator(ipam.DefaultIPv4Prefix, ipam.DefaultIPv6Prefix)
 	key, err := st.CreatePreAuthKey("test", true, false, []string{"tag:test"}, time.Hour)
 	if err != nil {
@@ -65,10 +65,14 @@ func TestNodeRecoveryAndRetirement(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := store.NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reopened.Close()
 	if _, ok := reopened.AuthenticateNode(req.NodeKey, rotated.NodeToken); ok {
 		t.Fatal("deleted node still authenticated after reopening store")
 	}
@@ -112,20 +116,17 @@ func TestConcurrentEnrollmentKeepsUniqueIdentity(t *testing.T) {
 }
 
 func TestApplicationKeyChangesRequirePersistence(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "keys.json")
+	path := filepath.Join(t.TempDir(), "private", "state.sqlite")
 	st, err := store.NewFileStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer st.Close()
 	key, err := st.CreatePreAuthKey("existing", false, false, nil, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(path, filepath.Join(dir, "backup.json")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(path, 0o700); err != nil {
+	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.CreatePreAuthKey("unsaved", false, false, nil, time.Hour); err == nil {
@@ -135,6 +136,6 @@ func TestApplicationKeyChangesRequirePersistence(t *testing.T) {
 		t.Fatal("revoked an application key without saving it")
 	}
 	if keys := st.ListPreAuthKeys(); len(keys) != 1 || keys[0].ID != key.ID || keys[0].Revoked {
-		t.Fatal("failed file writes changed the application key list")
+		t.Fatal("failed database writes changed the application key list")
 	}
 }

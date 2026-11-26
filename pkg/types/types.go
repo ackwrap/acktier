@@ -18,6 +18,9 @@ const (
 	ProtoWSS  TransportProto = "wss"
 )
 
+// TransportPorts maps an enabled transport protocol (udp, tcp, quic, wss) to its local listening port (1-65535).
+type TransportPorts map[TransportProto]uint16
+
 // Endpoint describes a reachable network address and transport protocol for a peer.
 type Endpoint struct {
 	Proto TransportProto `json:"proto"`
@@ -131,6 +134,7 @@ type PeerNode struct {
 	NodeKey          PublicKey      `json:"nodeKey"`
 	IPv4             netip.Addr     `json:"ipv4"`
 	IPv6             netip.Addr     `json:"ipv6"`
+	TransportPorts   TransportPorts `json:"transportPorts,omitempty"`
 	Endpoints        []Endpoint     `json:"endpoints,omitempty"`
 	Links            []PeerLink     `json:"links,omitempty"`
 	AllowedIPs       []netip.Prefix `json:"allowedIPs,omitempty"`
@@ -224,13 +228,16 @@ type OwnerJoinRequest struct {
 	NodeKey          PublicKey      `json:"nodeKey"`
 	Hostname         string         `json:"hostname"`
 	OS               string         `json:"os,omitempty"`
+	LastSeen         time.Time      `json:"lastSeen,omitzero"`
+	TransportPorts   TransportPorts `json:"transportPorts,omitempty"`
+	Endpoints        []Endpoint     `json:"endpoints,omitempty"`
 	AdvertisedRoutes []netip.Prefix `json:"advertisedRoutes,omitempty"`
 }
 
 // PreAuthKey allows unattended or automated node registration onto the control plane.
 type PreAuthKey struct {
 	ID        string    `json:"id"`
-	Key       string    `json:"key"`
+	Key       string    `json:"key,omitempty"` // Only returned when the key is created.
 	Label     string    `json:"label,omitempty"`
 	Reusable  bool      `json:"reusable"`
 	Ephemeral bool      `json:"ephemeral"`
@@ -248,6 +255,7 @@ type RegisterRequest struct {
 	AuthKey          string         `json:"authKey,omitempty"`
 	Hostname         string         `json:"hostname"`
 	OS               string         `json:"os"`
+	TransportPorts   TransportPorts `json:"transportPorts,omitempty"`
 	Endpoints        []Endpoint     `json:"endpoints,omitempty"`
 	AdvertisedRoutes []netip.Prefix `json:"advertisedRoutes,omitempty"`
 	CanRelay         bool           `json:"canRelay,omitempty"`
@@ -264,6 +272,7 @@ type RegisterResponse struct {
 // HeartbeatRequest updates dynamic endpoint, link-state RTT, and routing state of an authenticated node.
 type HeartbeatRequest struct {
 	NodeKey          PublicKey      `json:"nodeKey"`
+	TransportPorts   TransportPorts `json:"transportPorts,omitempty"`
 	Endpoints        []Endpoint     `json:"endpoints,omitempty"`
 	Links            []PeerLink     `json:"links,omitempty"`
 	AdvertisedRoutes []netip.Prefix `json:"advertisedRoutes,omitempty"`

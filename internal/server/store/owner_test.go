@@ -12,11 +12,8 @@ import (
 )
 
 func TestOwnerPublicationAndPinSurviveRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	st, err := NewFileStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(t.TempDir(), "private", "center.sqlite")
+	st := openTestSQLite(t, path)
 	pub, key, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -39,10 +36,10 @@ func TestOwnerPublicationAndPinSurviveRestart(t *testing.T) {
 	if _, _, err := st.PublishOwner(makePublication(2), now); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := NewFileStore(path)
-	if err != nil {
+	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
+	reopened := openTestSQLite(t, path)
 	if got, ok := reopened.OwnerTrust(); !ok || got != trust {
 		t.Fatalf("owner pin not persisted: %+v", got)
 	}
