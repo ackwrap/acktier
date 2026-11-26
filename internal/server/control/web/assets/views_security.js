@@ -1,5 +1,5 @@
 import {
-  api, el, badge, callout, searchBox, makeDropzone, copyableCode, fmtTime, toast, openModal, closeModal, setSessionCSRF,
+  api, el, badge, createSearchInput, makeDropzone, copyableCode, terminalSnippet, fmtTime, toast, openModal, closeModal, confirmModal, setSessionCSRF,
 } from './api.js';
 import { readPublicArtifact } from './artifacts.js';
 import { renderAuditRow } from './views_audit.js';
@@ -11,6 +11,13 @@ const keyStateMeta = {
   revoked: ['已吊销', 'err'],
 };
 
+const ttlPresets = [
+  [1, '1 小时'],
+  [24, '24 小时'],
+  [168, '7 天'],
+  [720, '30 天'],
+];
+
 export async function renderSecurity(container, refreshGlobal) {
   const newKeyBanner = el('div', { hidden: true });
   const keysMount = el('div', {});
@@ -20,10 +27,25 @@ export async function renderSecurity(container, refreshGlobal) {
   let auditState = { q: '', page: 1, size: 15 };
 
   function openCreateKeyModal() {
-    const labelIn = el('input', { type: 'text', id: 'new-key-label', maxlength: 64, required: true, placeholder: '例如：上海办公室 NAS 入网申请' });
+    const labelIn = el('input', { type: 'text', id: 'new-key-label', maxlength: 64, required: true, placeholder: '例如：上海办公室 NAS 入网申请', autofocus: true });
     const ttlIn = el('input', { type: 'number', id: 'new-key-ttl', min: 1, max: 720, value: 24, required: true });
     const reuseCheck = el('input', { type: 'checkbox', id: 'new-key-reuse' });
     const errBox = el('div', { class: 'callout error icon-start', hidden: true });
+
+    const presetBtns = ttlPresets.map(([hours, text]) => el('button', {
+      type: 'button',
+      class: 'preset-chip',
+      'aria-pressed': hours === 24 ? 'true' : 'false',
+      onClick: () => {
+        ttlIn.value = String(hours);
+        syncPresetHighlight();
+      },
+    }, text));
+    const syncPresetHighlight = () => {
+      const val = Number(ttlIn.value);
+      presetBtns.forEach((btn, i) => btn.setAttribute('aria-pressed', ttlPresets[i][0] === val ? 'true' : 'false'));
+    };
+    ttlIn.addEventListener('input', syncPresetHighlight);
 
     const form = el('form', {
       class: 'form-stack',
@@ -40,6 +62,7 @@ export async function renderSecurity(container, refreshGlobal) {
             },
           });
           closeModal();
+          const joinCmd = `acktier up --server <中心节点地址> --auth-key "${created.key}"`;
           newKeyBanner.hidden = false;
           newKeyBanner.className = 'preview-card form-stack';
           newKeyBanner.replaceChildren(
@@ -47,7 +70,14 @@ export async function renderSecurity(container, refreshGlobal) {
               badge('入网申请码已生成（一次性明文展示）', 'ok'),
               el('span', { class: 'muted' }, '离开或刷新页面后中心仅保留哈希摘要，无法再次查看明文'),
             ),
-            copyableCode(created.key, '复制新生成的申请码'),
+            el('div', { class: 'field' },
+              el('label', {}, '申请码明文'),
+              copyableCode(created.key, '复制新生成的申请码'),
+            ),
+            el('div', { class: 'field' },
+              el('label', {}, '节点一键提交申请命令（请将 <中心节点地址> 替换为中心的节点监听 URL）'),
+              terminalSnippet(joinCmd, '复制节点入网申请命令'),
+            ),
           );
           toast('申请码已创建');
           loadKeys();
@@ -64,6 +94,7 @@ export async function renderSecurity(container, refreshGlobal) {
       el('div', { class: 'field' },
         el('label', { for: 'new-key-ttl' }, '有效时长（小时，1–720）'),
         ttlIn,
+        el('div', { class: 'preset-row' }, ...presetBtns),
         el('p', { class: 'field-hint' }, '申请码仅允许节点向中心提交未验证入网申请，无法绕过所有者签名进入数据面。'),
       ),
       el('label', { class: 'checkbox-row', for: 'new-key-reuse' },
@@ -109,6 +140,13 @@ export async function renderSecurity(container, refreshGlobal) {
                 ? el('button', {
                   type: 'button', class: 'btn danger sm btn-trash icon-start',
                   onClick: async () => {
+                    const ok = await confirmModal({
+                      title: '吊销入网申请码',
+                      message: `确认立即吊销申请码「${k.label || k.id}」吗？`,
+                      detail: '吊销后新设备无法再使用此申请码提交申请；已获所有者签发的组网成员不受影响。',
+                      confirmText: '确认吊销',
+                    });
+                    if (!ok) return;
                     await api(`keys/${encodeURIComponent(k.id)}/revoke`, { method: 'POST' });
                     toast('申请码已吊销（不影响已签成员权限）');
                     loadKeys();
@@ -164,6 +202,13 @@ export async function renderSecurity(container, refreshGlobal) {
           ? el('button', {
             type: 'button', class: 'btn danger sm btn-trash icon-start',
             onClick: async () => {
+              const ok = await confirmModal({
+                title: '取消控制端 API 委托',
+                message: '确认立即取消控制端管理 API 委托吗？',
+                detail: '取消后原控制端 CLI 管理凭据立即失效；线上已发布的签名策略与节点通信不受影响。',
+                confirmText: '确认取消委托',
+              });
+              if (!ok) return;
               await api('delegation', { method: 'DELETE' });
               toast('已取消控制端委托，原 API 凭据已立即失效');
               loadDelegation();
@@ -261,9 +306,10 @@ export async function renderSecurity(container, refreshGlobal) {
     );
   }
 
-  const auditSearch = el('input', {
-    type: 'search', placeholder: '筛选动作、操作者或摘要…', 'aria-label': '筛选审计日志',
-    onInput: () => { auditState.q = auditSearch.value.trim(); auditState.page = 1; loadAudit(); },
+  const auditSearchWidget = createSearchInput({
+    placeholder: '筛选动作、操作者或摘要…',
+    ariaLabel: '筛选审计日志',
+    onSearch: (q) => { auditState.q = q; auditState.page = 1; loadAudit(); },
   });
 
   container.replaceChildren(
@@ -290,7 +336,7 @@ export async function renderSecurity(container, refreshGlobal) {
     el('section', { class: 'card form-stack' },
       el('div', { class: 'toolbar-row between' },
         el('h2', {}, '关键操作安全审计'),
-        searchBox(auditSearch),
+        auditSearchWidget,
       ),
       auditMount,
       auditPager,

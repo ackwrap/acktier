@@ -243,7 +243,35 @@ try {
 
   const cloned = await web('drafts', { method: 'POST', body: { name: 'Clone of active', fromActive: true } });
   assert.deepEqual(cloned.draft.policy.acl, acl);
-  for (const { draft: { id } } of [draft, cloned]) await web(`drafts/${id}`, { method: 'DELETE' });
+  await view(`policy/${cloned.draft.id}`, 'ACL 与策略');
+  await waitFor('cloned draft workspace', () => js(heading('Clone of active')));
+  const clonePath = `drafts/${cloned.draft.id}`;
+  const openDraftDelete = async () => {
+    assert.ok(await js(`(() => {
+      const dlg = document.querySelector('#modal-dialog');
+      [...document.querySelectorAll('.draft-layout section button')].find(b => b.textContent === '删除草稿').click();
+      window.draftDeleteClosed = new Promise(resolve => dlg.addEventListener('close', () => resolve(true), { once: true }));
+      return dlg.open && document.activeElement.value === 'cancel';
+    })()`), 'draft deletion must open a dialog focused on Cancel');
+  };
+  for (const selector of ['#modal-dialog button[value="cancel"]', '#modal-close-btn', null]) {
+    await openDraftDelete();
+    if (selector) {
+      await js(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    } else {
+      const esc = { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 };
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...esc });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...esc });
+    }
+    await js('window.draftDeleteClosed', true);
+    assert.equal((await web(clonePath)).draft.id, cloned.draft.id, 'dismissing the dialog must not delete the draft');
+  }
+  await openDraftDelete();
+  await js(`document.querySelector('#modal-dialog button[value="confirm"]').click()`);
+  await js('window.draftDeleteClosed', true);
+  await waitFor('confirmed deletion of the cloned draft', async () =>
+    !(await web('drafts')).some((item) => item.id === cloned.draft.id));
+  await web(`drafts/${draft.draft.id}`, { method: 'DELETE' });
   await assert.rejects(web('drafts', { method: 'POST', body: { fromActive: true } }), /完整 policy\.json/);
 
   // Use a new unsigned draft to prove that rule editing/JSON import cannot change the active authorization.
@@ -394,7 +422,7 @@ try {
   assert.ok(await js(`${one(modal)}.open && ${one('#acl-dst-1-ports')}.disabled`), 'ICMP should not have an editable port');
   await clickText(ruleForm, 'button', '取消');
   assert.equal(await js(`${one(modal)}.open`), false);
-  console.log('Browser check passed: private files stayed local, stale previews were ignored, and visual ACL edits stayed in the draft.');
+  console.log('Browser check passed: private files stayed local, stale previews were ignored, draft deletion required confirmation, and visual ACL edits stayed in the draft.');
 } finally {
   if (cdp) {
     await Promise.race([cdp.send('Browser.close').catch(() => {}), delay(250)]);

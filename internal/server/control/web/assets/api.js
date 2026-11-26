@@ -103,6 +103,73 @@ export function searchBox(inputNode) {
   );
 }
 
+// IME-safe debounced search input (modern-web-guidance: ime-safe-enter-submit).
+export function createSearchInput({ placeholder, ariaLabel, delayMs = 180, onSearch }) {
+  let timer = null;
+  let composing = false;
+  let lastCompositionEndAt = null;
+  let lastDispatched = '';
+
+  const flush = () => {
+    clearTimeout(timer);
+    const next = input.value.trim();
+    if (next === lastDispatched) return;
+    lastDispatched = next;
+    onSearch(next);
+  };
+
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(flush, delayMs);
+  };
+
+  const input = el('input', {
+    type: 'search',
+    placeholder,
+    'aria-label': ariaLabel,
+    onCompositionstart: () => {
+      composing = true;
+      clearTimeout(timer);
+    },
+    onCompositionend: (ev) => {
+      composing = false;
+      lastCompositionEndAt = ev.timeStamp;
+      schedule();
+    },
+    onInput: () => {
+      if (!composing) schedule();
+    },
+    onKeydown: (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        if (ev.isComposing || ev.keyCode === 229) return;
+        if (lastCompositionEndAt !== null && Math.abs(ev.timeStamp - lastCompositionEndAt) < 50) return;
+        flush();
+      } else if (ev.key === 'Escape' && input.value) {
+        ev.preventDefault();
+        input.value = '';
+        flush();
+      }
+    },
+  });
+
+  return searchBox(input);
+}
+
+export function terminalSnippet(commandText, label = '复制终端命令') {
+  const cmdId = `term-${++copySeq}`;
+  return el('div', { class: 'terminal-box' },
+    el('div', { class: 'terminal-cmd' },
+      el('span', { class: 'terminal-glyph icon', 'aria-hidden': 'true' }),
+      el('code', { id: cmdId, dataset: { fullText: commandText } }, commandText),
+    ),
+    el('span', { class: 'copy' },
+      el('button', { type: 'button', class: 'copy-button icon-start', command: '--copy', commandfor: cmdId, 'aria-label': label }, '复制'),
+      el('span', { class: 'tip', role: 'status' }),
+    ),
+  );
+}
+
 // Keeps full unbroken string in the DOM while visually keeping the trailing characters visible (single-line-overflow).
 let copySeq = 0;
 export function copyableCode(text, label = '复制内容', truncate = false) {
@@ -220,6 +287,32 @@ export function openModal(title, contentNode, { closedBy = 'any' } = {}) {
 export function closeModal() {
   const dlg = document.getElementById('modal-dialog');
   if (dlg?.open) dlg.close();
+}
+
+// Accessible confirmation modal focusing the safe Cancel control first (modern-web-guidance: dialog).
+export function confirmModal({ title, message, detail = '', confirmText = '确认执行', danger = true }) {
+  return new Promise((resolve) => {
+    const dlg = document.getElementById('modal-dialog');
+    const cancelBtn = el('button', { type: 'submit', value: 'cancel', class: 'btn secondary', autofocus: true }, '取消');
+    const okBtn = el('button', {
+      type: 'submit',
+      value: 'confirm',
+      class: `btn ${danger ? 'danger btn-trash' : 'primary btn-check'} icon-start`,
+    }, confirmText);
+    const form = el('form', { method: 'dialog', class: 'form-stack' },
+      callout(danger ? 'warn' : '', message),
+      detail ? el('p', { class: 'muted' }, detail) : null,
+      el('div', { class: 'form-actions' }, cancelBtn, okBtn),
+    );
+    const onClose = () => {
+      // Consume the submit value before clearing it; dismissals may leave it unchanged.
+      const confirmed = dlg.returnValue === 'confirm';
+      dlg.returnValue = '';
+      resolve(confirmed);
+    };
+    dlg.addEventListener('close', onClose, { once: true });
+    openModal(title, form, { closedBy: 'closerequest' });
+  });
 }
 
 // Accessible tabs helper (modern-web-guidance tabs: aria-selected + hidden="until-found").
@@ -350,7 +443,6 @@ export function initPlatformEnhancements() {
 
   // Dialog light-dismiss fallback where native closedby is unavailable.
   const dlg = document.getElementById('modal-dialog');
-  dlg?.addEventListener('close', () => { dlg.returnValue = ''; });
   document.getElementById('modal-close-btn')?.addEventListener('click', () => dlg.close());
   if (dlg && !('closedBy' in HTMLDialogElement.prototype)) {
     const outside = (ev) => {

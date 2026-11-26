@@ -1,4 +1,4 @@
-/* Forms, Dropzones, Buttons & Controls */
+/* Forms, Dropzones, Buttons, Accordions, Tables & Overlays */
 .form-stack {
   display: flex;
   flex-direction: column;
@@ -15,7 +15,7 @@
   gap: 0.35rem;
 }
 .field label {
-  font-size: 0.86rem;
+  font-size: 0.85rem;
   font-weight: 600;
 }
 .field-hint {
@@ -33,13 +33,13 @@ select,
 textarea {
   inline-size: 100%;
   min-block-size: 2.35rem;
-  padding: 0.5rem 0.75rem;
+  padding: 0.48rem 0.75rem;
   border-radius: 0.55rem;
   border: 1px solid var(--border-strong);
   background: var(--surface);
   color: var(--text);
   font: inherit;
-  font-size: 0.9rem;
+  font-size: 0.89rem;
   transition: border-color 0.12s, box-shadow 0.12s;
 }
 input:hover,
@@ -47,11 +47,24 @@ select:hover,
 textarea:hover {
   border-color: var(--accent);
 }
+input:not([type="range"]):user-invalid,
+select:user-invalid,
+textarea:user-invalid,
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: var(--err-border);
+}
 input:focus-visible,
 select:focus-visible,
-textarea:focus-visible,
+textarea:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent), transparent 82%);
+  outline: 2px solid transparent;
+}
 button:focus-visible,
-a:focus-visible {
+a:focus-visible,
+summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -65,12 +78,12 @@ a:focus-visible {
 }
 .search-field .search-glyph {
   position: absolute;
-  inset-inline-start: 0.75rem;
+  inset-inline-start: 0.78rem;
   color: var(--muted);
   pointer-events: none;
 }
 .search-field input[type="search"] {
-  padding-inline-start: 2.25rem;
+  padding-inline-start: 2.3rem;
 }
 
 /* Segmented Filter Pills */
@@ -86,15 +99,16 @@ a:focus-visible {
 }
 .seg-btn {
   min-block-size: 1.9rem;
-  padding: 0.25rem 0.75rem;
+  padding: 0.24rem 0.78rem;
   border-radius: 0.45rem;
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
   font: inherit;
-  font-size: 0.82rem;
+  font-size: 0.81rem;
   font-weight: 600;
   cursor: pointer;
+  transition: background-color 0.12s, color 0.12s;
 }
 .seg-btn:hover {
   color: var(--text);
@@ -103,19 +117,19 @@ a:focus-visible {
   background: var(--surface);
   color: var(--accent);
   border-color: var(--border);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
 }
 
-/* Accessible File Dropzone (keeps native <input type="file"> focusable & CDP-selectable) */
+/* Accessible File Dropzone */
 .dropzone {
   position: relative;
   display: flex;
   align-items: center;
   gap: 1rem;
-  padding: 1.1rem 1.25rem;
+  padding: 1.05rem 1.25rem;
   border-radius: 0.75rem;
-  border: 2px dashed var(--border-strong);
-  background: var(--surface-subtle);
+  border: 1.5px dashed var(--border-strong);
+  background: color-mix(in oklab, var(--surface-subtle), var(--surface) 35%);
   cursor: pointer;
   transition: border-color 0.15s, background-color 0.15s;
 }
@@ -128,12 +142,12 @@ a:focus-visible {
 .dropzone.has-file {
   border-style: solid;
   border-color: var(--ok-border);
-  background: color-mix(in oklab, var(--ok-bg), var(--surface) 55%);
+  background: color-mix(in oklab, var(--ok-bg), var(--surface) 60%);
 }
 .dropzone:has(input[aria-invalid="true"]) {
   border-style: solid;
   border-color: var(--err-border);
-  background: color-mix(in oklab, var(--err-bg), var(--surface) 55%);
+  background: color-mix(in oklab, var(--err-bg), var(--surface) 60%);
 }
 .dropzone input[type="file"] {
   position: absolute;
@@ -147,12 +161,13 @@ a:focus-visible {
 .dropzone-glyph {
   display: inline-grid;
   place-items: center;
-  inline-size: 2.65rem;
-  block-size: 2.65rem;
+  inline-size: 2.6rem;
+  block-size: 2.6rem;
   border-radius: 0.65rem;
   background: var(--surface);
   color: var(--accent);
   border: 1px solid var(--border);
+  box-shadow: var(--shadow-card);
   flex: none;
 }
 .dropzone.has-file .dropzone-glyph {
@@ -175,8 +190,52 @@ a:focus-visible {
   color: var(--text);
 }
 .dropzone-sub {
-  font-size: 0.79rem;
+  font-size: 0.78rem;
   color: var(--muted);
+}
+
+/* Styled Disclosure / Accordion (modern-web-guidance: accordion) */
+summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: pointer;
+}
+summary::-webkit-details-marker {
+  display: none;
+}
+summary::before {
+  content: "";
+  inline-size: 1rem;
+  block-size: 1rem;
+  flex: none;
+  background-color: var(--muted);
+  mask: var(--icon-chevron-down) no-repeat center / contain;
+  rotate: -90deg;
+  forced-color-adjust: none;
+}
+summary:dir(rtl)::before {
+  rotate: 90deg;
+}
+details[open] > summary::before {
+  rotate: 0deg;
+  background-color: var(--accent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  summary::before {
+    transition: rotate 0.18s ease-out;
+  }
+  details::details-content {
+    interpolate-size: allow-keywords;
+    overflow: clip;
+    contain: layout;
+    transition: block-size 0.22s ease-in-out, content-visibility 0.22s ease-in-out, display 0.22s ease-in-out;
+    transition-behavior: allow-discrete;
+  }
+  details:not([open])::details-content {
+    block-size: 0;
+  }
 }
 
 /* Dark Code Editor Frame & Terminal Command Box */
@@ -193,9 +252,12 @@ a:focus-visible {
   gap: 0.5rem;
   padding: 0.45rem 0.85rem;
   background: #162033;
-  border-block-end: 1px solid #2c3d59;
+  border-block-end: 1px solid #283854;
   color: #cbd5e1;
-  font-size: 0.78rem;
+  font-size: 0.76rem;
+}
+.editor-bar .btn.ghost {
+  color: #cbd5e1;
 }
 .editor-frame textarea.code-editor {
   border: none;
@@ -203,17 +265,17 @@ a:focus-visible {
   background: var(--surface-code);
   color: #e2e8f0;
   font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
-  font-size: 0.84rem;
+  font-size: 0.83rem;
   line-height: 1.55;
-  min-block-size: 17rem;
+  min-block-size: 16.5rem;
   padding: 0.9rem 1rem;
   resize: vertical;
 }
 textarea.code-editor {
   font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
-  font-size: 0.84rem;
+  font-size: 0.83rem;
   line-height: 1.55;
-  min-block-size: 16rem;
+  min-block-size: 15.5rem;
   resize: vertical;
 }
 
@@ -222,11 +284,11 @@ textarea.code-editor {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.7rem 0.95rem;
+  padding: 0.65rem 0.9rem;
   border-radius: 0.65rem;
   background: var(--surface-code);
   color: #e2e8f0;
-  border: 1px solid #2c3d59;
+  border: 1px solid #283854;
 }
 .terminal-cmd {
   display: flex;
@@ -243,6 +305,16 @@ textarea.code-editor {
   color: #f8fafc;
   white-space: nowrap;
 }
+.terminal-box .copy-button {
+  background: #162033;
+  border: 1px solid #33486b;
+  border-radius: 0.4rem;
+  color: #cbd5e1;
+}
+.terminal-box .copy-button:hover {
+  color: #ffffff;
+  border-color: #60a5fa;
+}
 
 .input-group {
   display: flex;
@@ -254,8 +326,8 @@ textarea.code-editor {
   display: flex;
   align-items: flex-start;
   gap: 0.6rem;
-  font-size: 0.88rem;
-  padding: 0.6rem 0.75rem;
+  font-size: 0.87rem;
+  padding: 0.62rem 0.8rem;
   border-radius: 0.6rem;
   border: 1px solid var(--border);
   background: var(--surface-subtle);
@@ -282,20 +354,20 @@ textarea.code-editor {
   justify-content: space-between;
 }
 
-/* Buttons (no fixed height on text elements — WCAG 1.4.12) */
+/* Buttons */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.35rem;
-  min-block-size: 2.25rem;
-  padding: 0.42rem 0.9rem;
-  border-radius: 0.55rem;
+  min-block-size: 2.22rem;
+  padding: 0.4rem 0.88rem;
+  border-radius: 0.52rem;
   border: 1px solid var(--border-strong);
   background: var(--surface);
   color: var(--text);
   font: inherit;
-  font-size: 0.86rem;
+  font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
   text-decoration: none;
@@ -310,21 +382,25 @@ textarea.code-editor {
   transform: translateY(1px);
 }
 .btn:disabled {
-  opacity: 0.48;
+  opacity: 0.46;
   cursor: not-allowed;
 }
 .btn.primary {
   background: var(--accent);
   color: var(--accent-fg);
   border-color: var(--accent);
-  box-shadow: 0 1px 2px rgb(29 78 216 / 0.25);
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--accent), transparent 68%);
 }
 .btn.primary:hover:not(:disabled) {
-  filter: brightness(1.07);
+  background: color-mix(in oklab, var(--accent) 90%, var(--accent-fg));
 }
 .btn.danger {
-  background: var(--err-bg);
+  background: color-mix(in oklab, var(--err-bg), var(--surface) 38%);
   color: var(--err-fg);
+  border-color: color-mix(in oklab, var(--err-border), transparent 42%);
+}
+.btn.danger:hover:not(:disabled) {
+  background: var(--err-bg);
   border-color: var(--err-border);
 }
 .btn.ghost {
@@ -336,22 +412,23 @@ textarea.code-editor {
   border-color: var(--border);
 }
 .btn.sm {
-  min-block-size: 1.85rem;
-  padding: 0.24rem 0.65rem;
-  font-size: 0.79rem;
+  min-block-size: 1.82rem;
+  padding: 0.22rem 0.62rem;
+  font-size: 0.78rem;
+  border-radius: 0.45rem;
 }
 .btn.full {
   inline-size: 100%;
 }
 
-/* Styled <progress> Bar (modern-web-guidance: progress) */
+/* Styled <progress> Bar */
 progress.expiry-bar {
   appearance: none;
   border: 0 solid;
   overflow: clip;
   container-type: inline-size;
   inline-size: 100%;
-  block-size: 0.55rem;
+  block-size: 0.5rem;
   --progress-bar-radius: 999px;
   border-radius: var(--progress-bar-radius);
   background: var(--surface-subtle);
@@ -370,86 +447,82 @@ progress.expiry-bar::-moz-progress-bar {
   border-radius: var(--progress-bar-radius);
   transition: inline-size 0.3s;
 }
-progress.expiry-bar.ok {
-  --progress-bar-fill: var(--ok-border);
-}
-progress.expiry-bar.warn {
-  --progress-bar-fill: var(--warn-border);
-}
-progress.expiry-bar.err {
-  --progress-bar-fill: var(--err-border);
-}
+progress.expiry-bar.ok { --progress-bar-fill: var(--ok-border); }
+progress.expiry-bar.warn { --progress-bar-fill: var(--warn-border); }
+progress.expiry-bar.err { --progress-bar-fill: var(--err-border); }
 
-/* Single-line visual middle truncation preserving full DOM text (single-line-overflow) */
+/* Seamless Capsule Code + Copy Pill (eliminates double-box table noise) */
 .code-pill {
   display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
+  align-items: stretch;
   max-inline-size: 100%;
   flex-wrap: nowrap;
+  border-radius: 0.42rem;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+.code-pill > code {
+  border: 0;
+  border-radius: 0.4rem 0 0 0.4rem;
+  background: transparent;
+  padding: 0.16rem 0.5rem;
+  display: inline-flex;
+  align-items: center;
 }
 .code-nowrap {
   white-space: nowrap;
-  padding: 0.12rem 0.42rem;
-  border-radius: 0.38rem;
-  background: var(--surface-subtle);
-  border: 1px solid var(--border);
 }
 .truncate-mid {
   display: inline-flex;
-  max-inline-size: 11.75rem;
+  max-inline-size: 11.5rem;
   white-space: nowrap;
-  padding: 0.12rem 0.42rem;
-  border-radius: 0.38rem;
-  background: var(--surface-subtle);
-  border: 1px solid var(--border);
 }
 .truncate-mid > .truncate-head {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* Copy Button (modern-web-guidance: copy-button) */
+/* Copy Button */
 .copy {
   position: relative;
   display: inline-flex;
-  align-items: center;
+  align-items: stretch;
   flex: none;
 }
 .copy-button {
   display: inline-flex;
   align-items: center;
   min-inline-size: 1.65rem;
-  min-block-size: 1.55rem;
+  min-block-size: 1.5rem;
   padding: 0.12rem 0.48rem;
-  border-radius: 0.4rem;
-  border: 1px solid var(--border);
+  border: 0;
+  border-inline-start: 1px solid var(--border);
+  border-radius: 0 0.4rem 0.4rem 0;
   background: var(--surface);
   color: var(--muted);
   font: inherit;
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   font-weight: 600;
   white-space: nowrap;
   flex: none;
   cursor: pointer;
+  transition: background-color 0.12s, color 0.12s;
 }
 .copy-button:hover {
-  color: var(--text);
-  border-color: var(--accent);
-  background: var(--surface-subtle);
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 .copy-button[data-copied] {
   color: var(--ok-fg);
-  border-color: var(--ok-border);
   background: var(--ok-bg);
 }
 .copy-button[data-failed] {
   color: var(--err-fg);
-  border-color: var(--err-border);
+  background: var(--err-bg);
 }
 .copy .tip {
   position: absolute;
-  inset-block-end: calc(100% + 0.25rem);
+  inset-block-end: calc(100% + 0.28rem);
   inset-inline-end: 0;
   padding: 0.16rem 0.48rem;
   border-radius: 0.35rem;
@@ -468,11 +541,11 @@ progress.expiry-bar.err {
   opacity: 1;
 }
 
-/* Responsive Data Tables (modern-web-guidance: responsive-table) */
+/* Responsive Data Tables */
 .table-wrapper {
   overflow: auto;
   max-inline-size: 100%;
-  max-block-size: min(40rem, 74vh);
+  max-block-size: min(42rem, 74vh);
   container-type: inline-size;
   border: 1px solid var(--border);
   border-radius: 0.75rem;
@@ -483,15 +556,15 @@ table {
   inline-size: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  font-size: 0.86rem;
+  font-size: 0.855rem;
 }
 table caption {
   text-align: start;
-  padding: 0.62rem 0.95rem;
+  padding: 0.58rem 0.95rem;
   font-weight: 600;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   color: var(--muted);
-  background: var(--surface-subtle);
+  background: color-mix(in oklab, var(--surface-subtle), var(--surface) 45%);
   border-block-end: 1px solid var(--border);
 }
 thead {
@@ -501,15 +574,18 @@ thead {
   background: var(--surface-subtle);
 }
 th, td {
-  padding: 0.7rem 0.9rem;
+  padding: 0.72rem 0.95rem;
   text-align: start;
   vertical-align: middle;
-  border-block-end: 1px solid var(--border);
+  border-block-end: 1px solid color-mix(in oklab, var(--border), transparent 22%);
 }
 thead th {
-  font-size: 0.76rem;
+  padding-block: 0.58rem;
+  font-size: 0.74rem;
   color: var(--muted);
   font-weight: 700;
+  letter-spacing: 0.02em;
+  border-block-end-color: var(--border);
   white-space: nowrap;
 }
 tbody th {
@@ -525,7 +601,7 @@ tbody tr:last-child td {
 }
 tbody tr:hover th,
 tbody tr:hover td {
-  background: var(--surface-subtle);
+  background: color-mix(in oklab, var(--surface-subtle), var(--surface) 38%);
 }
 
 .node-title {
@@ -535,8 +611,8 @@ tbody tr:hover td {
   font-weight: 600;
 }
 .status-dot {
-  inline-size: 0.55rem;
-  block-size: 0.55rem;
+  inline-size: 0.52rem;
+  block-size: 0.52rem;
   border-radius: 999px;
   background: var(--muted);
   flex: none;
@@ -547,6 +623,7 @@ tbody tr:hover td {
 }
 .status-dot.warn {
   background: var(--warn-border);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--warn-border), transparent 78%);
 }
 
 table.tbl-requests {
@@ -565,7 +642,7 @@ table.tbl-keys {
   --c2: "状态"; --c3: "使用次数"; --c4: "到期时间"; --c5: "操作";
 }
 table.tbl-history {
-  --c2: "快照摘要"; --c3: "成员 / 规则"; --c4: "发布时间"; --c5: "到期时间"; --c6: "操作";
+  --c2: "快照摘要"; --c3: "成员 / 规则"; --c4: "到期时间与状态"; --c5: "操作";
 }
 table.tbl-audit {
   --c2: "操作者"; --c3: "动作"; --c4: "目标"; --c5: "结果与说明";
@@ -603,18 +680,18 @@ table.tbl-audit {
   display: flex;
   overflow-x: auto;
   border-block-end: 1px solid var(--border);
-  gap: 0.2rem;
+  gap: 0.25rem;
 }
 .tablist [role="tab"] {
   flex: none;
   position: relative;
-  min-block-size: 2.35rem;
+  min-block-size: 2.4rem;
   padding: 0.55rem 0.95rem;
   border: none;
   background: transparent;
   color: var(--muted);
   font: inherit;
-  font-size: 0.88rem;
+  font-size: 0.875rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -628,10 +705,11 @@ table.tbl-audit {
   content: "";
   position: absolute;
   inset: auto 0 0;
-  border-block-end: 3px solid var(--accent);
+  border-block-end: 2.5px solid var(--accent);
+  border-radius: 2px 2px 0 0;
 }
 .tabpanel-body {
-  padding-block-start: 1rem;
+  padding-block-start: 1.05rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -641,13 +719,13 @@ table.tbl-audit {
 .draft-list {
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
+  gap: 0.5rem;
 }
 .draft-item {
   inline-size: 100%;
   text-align: start;
-  padding: 0.7rem 0.85rem;
-  border-radius: 0.65rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 0.7rem;
   border: 2px solid var(--border);
   background: var(--surface);
   color: var(--text);
@@ -655,7 +733,7 @@ table.tbl-audit {
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.28rem;
   transition: border-color 0.12s, background-color 0.12s;
 }
 .draft-item:hover {
@@ -663,7 +741,7 @@ table.tbl-audit {
 }
 .draft-item.active {
   border-color: var(--accent);
-  background: var(--accent-soft);
+  background: color-mix(in oklab, var(--accent-soft), var(--surface) 45%);
 }
 
 .chip-list {
@@ -674,29 +752,29 @@ table.tbl-audit {
 .chip {
   display: inline-flex;
   align-items: center;
-  padding: 0.12rem 0.46rem;
-  border-radius: 0.38rem;
+  padding: 0.11rem 0.46rem;
+  border-radius: 0.36rem;
   background: var(--surface-subtle);
   border: 1px solid var(--border);
-  font-size: 0.75rem;
-  font-weight: 500;
+  font-size: 0.74rem;
+  font-weight: 600;
 }
 
 .empty-state {
   padding: 2.25rem 1.25rem;
   text-align: center;
   color: var(--muted);
-  background: var(--surface-subtle);
+  background: color-mix(in oklab, var(--surface-subtle), var(--surface) 40%);
   border: 1px dashed var(--border-strong);
   border-radius: 0.75rem;
-  font-size: 0.88rem;
+  font-size: 0.875rem;
 }
 
 /* Pro Network Mesh Topology Canvas */
 .topo-frame {
   border: 1px solid var(--border);
-  border-radius: 0.75rem;
-  background: var(--surface-subtle);
+  border-radius: 0.8rem;
+  background: color-mix(in oklab, var(--surface-subtle), var(--surface) 30%);
   overflow: clip;
 }
 .topo-legend {
@@ -705,7 +783,7 @@ table.tbl-audit {
   justify-content: space-between;
   gap: 0.75rem;
   flex-wrap: wrap;
-  padding: 0.55rem 0.9rem;
+  padding: 0.58rem 1rem;
   border-block-end: 1px solid var(--border);
   background: var(--surface);
   font-size: 0.76rem;
@@ -714,29 +792,39 @@ table.tbl-audit {
 .topo-legend-items {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 1.1rem;
   flex-wrap: wrap;
 }
 .legend-item {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.38rem;
+  font-weight: 500;
 }
 .topo-svg {
   inline-size: 100%;
   block-size: auto;
-  max-block-size: 22rem;
+  max-block-size: 23rem;
   display: block;
 }
 .topo-grid-dot {
   fill: var(--border-strong);
-  opacity: 0.35;
+  opacity: 0.32;
 }
 .topo-link {
   fill: none;
   stroke: var(--accent);
   stroke-width: 2;
-  stroke-opacity: 0.55;
+  stroke-opacity: 0.58;
+}
+.topo-link.proto-udp {
+  stroke: var(--ok-border);
+  stroke-opacity: 0.65;
+}
+.topo-link.proto-wss {
+  stroke: var(--warn-border);
+  stroke-dasharray: 5 3;
+  stroke-opacity: 0.7;
 }
 .topo-pill-bg {
   fill: var(--surface);
@@ -757,7 +845,7 @@ table.tbl-audit {
   fill: none;
   stroke: var(--warn-border);
   stroke-width: 2;
-  stroke-dasharray: 4 2;
+  stroke-dasharray: 4 2.5;
 }
 .topo-node-online {
   fill: var(--ok-border);
@@ -771,8 +859,50 @@ table.tbl-audit {
 }
 .topo-plate {
   fill: var(--surface);
-  stroke: var(--border-strong);
-  stroke-width: 1;
+  stroke: var(--border);
+  stroke-width: 1.2;
+  transition: stroke 0.15s, stroke-width 0.15s;
+}
+.topo-node-link {
+  cursor: pointer;
+  text-decoration: none;
+}
+.topo-node-link:hover .topo-plate,
+.topo-node-link:focus-visible .topo-plate {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.topo-node-link:focus-visible {
+  outline: none;
+}
+
+.preset-row {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  flex-wrap: wrap;
+  margin-block-start: 0.2rem;
+}
+.preset-chip {
+  min-block-size: 1.7rem;
+  padding: 0.14rem 0.58rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.preset-chip:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.preset-chip[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .topo-node-name {
   fill: var(--text);
@@ -789,8 +919,8 @@ table.tbl-audit {
 dialog {
   inline-size: min(94vw, 43rem);
   max-block-size: 88dvh;
-  border: 1px solid var(--border-strong);
-  border-radius: 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
   padding: 0;
   background: var(--surface);
   color: var(--text);
@@ -804,13 +934,13 @@ dialog:modal {
   overscroll-behavior: contain;
 }
 dialog::backdrop {
-  background: rgb(8 13 24 / 0.58);
-  backdrop-filter: blur(3px);
+  background: rgb(8 13 24 / 0.56);
+  backdrop-filter: blur(4px);
   overflow: hidden;
   overscroll-behavior: contain;
 }
 .dialog-header {
-  padding: 1rem 1.3rem;
+  padding: 1rem 1.35rem;
   border-block-end: 1px solid var(--border);
   display: flex;
   align-items: center;
@@ -820,9 +950,10 @@ dialog::backdrop {
 .dialog-title {
   margin: 0;
   font-size: 1.05rem;
+  font-weight: 700;
 }
 .dialog-body {
-  padding: 1.3rem;
+  padding: 1.35rem;
   overflow-y: auto;
 }
 

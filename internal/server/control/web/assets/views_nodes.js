@@ -1,8 +1,84 @@
 import {
-  api, el, badge, callout, searchBox, makeDropzone, copyableCode, fmtTime, fmtRelative, fmtPortsMap, toast, openModal, closeModal,
+  api, el, badge, callout, createSearchInput, makeDropzone, copyableCode, fmtTime, fmtRelative, fmtPortsMap, toast, openModal, closeModal, confirmModal,
 } from './api.js';
 import { parseInventorySource } from './artifacts.js';
 import { openAddMemberModal } from './views_overview.js';
+
+async function openApproveRoutesModal(detail, navTo) {
+  const signed = detail.signed;
+  const unapproved = detail.flags?.unapprovedRoutes || [];
+  const drafts = await api('drafts');
+  const draftSelect = el('select', { id: 'route-draft-id' },
+    el('option', { value: '__new__' }, '＋ 新建一份基于当前生效快照的草稿'),
+    ...drafts.map((d) => el('option', { value: d.id }, `${d.name}（${d.members} 成员）`)),
+  );
+  if (drafts.length > 0) draftSelect.value = drafts[0].id;
+
+  const checks = unapproved.map((rt) => {
+    const cb = el('input', { type: 'checkbox', value: rt, checked: true });
+    return { cb, row: el('label', { class: 'checkbox-row' }, cb, el('code', {}, rt)) };
+  });
+  const errBox = el('div', { class: 'callout error icon-start', hidden: true });
+
+  const form = el('form', {
+    class: 'form-stack',
+    onSubmit: async (e) => {
+      e.preventDefault();
+      errBox.hidden = true;
+      const chosen = checks.filter((x) => x.cb.checked).map((x) => x.cb.value);
+      if (!chosen.length) {
+        errBox.textContent = '请至少勾选一条要并入草稿的子网路由。';
+        errBox.hidden = false;
+        return;
+      }
+      try {
+        let draftId = draftSelect.value;
+        if (draftId === '__new__') {
+          const created = await api('drafts', {
+            method: 'POST',
+            body: { name: `路由批准草稿 (${signed.name})`, fromActive: true },
+          });
+          draftId = created.draft.id;
+        }
+        const cur = await api(`drafts/${encodeURIComponent(draftId)}`);
+        const nextPol = structuredClone(cur.draft.policy);
+        const member = nextPol.members.find((m) => m.nodeKey === detail.nodeKey);
+        if (member) {
+          member.routes = [...new Set([...(member.routes || []), ...chosen])];
+          await api(`drafts/${encodeURIComponent(draftId)}`, { method: 'PUT', body: { policy: nextPol } });
+        } else {
+          await api(`drafts/${encodeURIComponent(draftId)}/members`, {
+            method: 'POST',
+            body: {
+              nodeKey: detail.nodeKey,
+              name: signed.name,
+              ipv4: signed.ipv4,
+              ipv6: signed.ipv6 || '',
+              tags: signed.tags || [],
+              routes: [...new Set([...(signed.routes || []), ...chosen])],
+            },
+          });
+        }
+        closeModal();
+        toast('已将所选路由并入策略草稿（需导出签发后生效）');
+        navTo(`policy/${draftId}`);
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.hidden = false;
+      }
+    },
+  },
+    callout('', '勾选要批准的申报网段并写入策略草稿；不会直接修改线上生效路由。'),
+    errBox,
+    el('div', { class: 'field' }, el('label', { for: 'route-draft-id' }, '目标策略草稿'), draftSelect),
+    el('div', { class: 'field' }, el('label', {}, `节点 ${signed.name} 新申报的未批准网段`), ...checks.map((x) => x.row)),
+    el('div', { class: 'form-actions' },
+      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, '取消'),
+      el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, '写入策略草稿'),
+    ),
+  );
+  openModal(`并入草稿批准路由 · ${signed.name}`, form);
+}
 
 function openInventoryModal(nodeKey, currentInv, onSaved) {
   const sample = currentInv
@@ -266,6 +342,13 @@ async function renderNodeDetailCard(nodeKey, navTo, onRefresh) {
         ? el('button', {
           type: 'button', class: 'btn danger sm btn-trash icon-start',
           onClick: async () => {
+            const ok = await confirmModal({
+              title: '清除人工能力清单',
+              message: `确认移除节点 ${signed?.name || rep?.hostname || ''} 的人工导入能力清单吗？`,
+              detail: '这不会影响节点的线上授权或自动上报数据。',
+              confirmText: '确认清除',
+            });
+            if (!ok) return;
             await api(`nodes/${encodeURIComponent(d.nodeKey)}/inventory`, { method: 'DELETE' });
             toast('人工能力清单已移除');
             onRefresh();
@@ -277,8 +360,15 @@ async function renderNodeDetailCard(nodeKey, navTo, onRefresh) {
 
   const mismatchAlerts = [];
   if ((flags.unapprovedRoutes || []).length) {
-    mismatchAlerts.push(callout('warn',
-      `节点自报了尚未获所有者签发批准的网段：${flags.unapprovedRoutes.join('、')}（未签发前不会进入转发平面）。`));
+    mismatchAlerts.push(el('div', { class: 'callout warn icon-start toolbar-row between' },
+      el('span', {}, `节点自报了尚未获所有者签发批准的网段：${flags.unapprovedRoutes.join('、')}（未签发前不会进入转发平面）。`),
+      signed
+        ? el('button', {
+          type: 'button', class: 'btn secondary sm btn-plus icon-start',
+          onClick: () => openApproveRoutesModal(d, navTo),
+        }, '并入草稿批准路由')
+        : null,
+    ));
   }
   if ((flags.unadvertisedRoutes || []).length) {
     mismatchAlerts.push(callout('warn',
@@ -304,16 +394,17 @@ async function renderNodeDetailCard(nodeKey, navTo, onRefresh) {
 }
 
 export async function renderNodes(container, navTo, selectedKey = '') {
-  let state = { q: '', status: '', page: 1, size: 20, detailKey: selectedKey };
+  const isFilterParam = selectedKey.startsWith('status:');
+  const initialStatus = isFilterParam ? selectedKey.slice(7) : '';
+  let state = { q: '', status: initialStatus, page: 1, size: 20, detailKey: isFilterParam ? '' : selectedKey };
   const detailMount = el('div', {});
   const tableMount = el('div', {});
   const pagerMount = el('div', { class: 'toolbar-row between' });
 
-  const searchInput = el('input', {
-    type: 'search',
+  const searchWidget = createSearchInput({
     placeholder: '搜索已签名称、自报主机名、虚拟 IP 或节点公钥…',
-    'aria-label': '搜索节点',
-    onInput: () => { state.q = searchInput.value.trim(); state.page = 1; loadList(); },
+    ariaLabel: '搜索节点',
+    onSearch: (q) => { state.q = q; state.page = 1; loadList(); },
   });
 
   const filterDefs = [
@@ -388,10 +479,20 @@ export async function renderNodes(container, navTo, selectedKey = '') {
           ),
           el('td', {}, n.reported ? fmtRelative(n.lastSeen) : '从未连接'),
           el('td', {},
-            el('button', {
-              type: 'button', class: 'btn secondary sm',
-              onClick: () => navTo(`nodes/${encodeURIComponent(n.nodeKey)}`),
-            }, '三方对照'),
+            el('div', { class: 'toolbar-row' },
+              n.status === 'request'
+                ? el('button', {
+                  type: 'button', class: 'btn primary sm btn-plus icon-start',
+                  onClick: () => openAddMemberModal({
+                    nodeKey: n.nodeKey, hostname: n.hostname, advertisedRoutes: n.advertisedRoutes,
+                  }, navTo),
+                }, '加入草稿')
+                : null,
+              el('button', {
+                type: 'button', class: 'btn secondary sm',
+                onClick: () => navTo(`nodes/${encodeURIComponent(n.nodeKey)}`),
+              }, '三方对照'),
+            ),
           ),
         );
       });
@@ -432,7 +533,7 @@ export async function renderNodes(container, navTo, selectedKey = '') {
     ),
     detailMount,
     el('section', { class: 'card form-stack' },
-      el('div', { class: 'toolbar-row between' }, searchBox(searchInput), segmentedBar),
+      el('div', { class: 'toolbar-row between' }, searchWidget, segmentedBar),
       tableMount,
       pagerMount,
     ),

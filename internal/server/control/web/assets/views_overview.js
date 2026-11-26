@@ -1,5 +1,5 @@
 import {
-  api, el, badge, callout, searchBox, copyableCode, fmtTime, fmtRelative, fmtBytes, fmtPortsMap, toast, openModal, closeModal,
+  api, el, badge, callout, createSearchInput, copyableCode, fmtTime, fmtRelative, fmtBytes, fmtPortsMap, toast, openModal, closeModal,
 } from './api.js';
 import { renderAuditRow } from './views_audit.js';
 
@@ -33,11 +33,14 @@ function buildTopologyCanvas(topo) {
     'aria-label': '组网成员与实测链路拓扑图',
   });
 
-  // Subtle dot-matrix background pattern
+  // Subtle dot-matrix background pattern + soft card drop-shadow
   const defs = svgEl('defs', {});
-  const pattern = svgEl('pattern', { id: 'mesh-grid', width: 24, height: 24, patternUnits: 'userSpaceOnUse' });
+  const pattern = svgEl('pattern', { id: 'mesh-grid', width: 22, height: 22, patternUnits: 'userSpaceOnUse' });
   pattern.append(svgEl('circle', { cx: 2, cy: 2, r: 1, class: 'topo-grid-dot' }));
+  const shadow = svgEl('filter', { id: 'plate-shadow', x: '-12%', y: '-12%', width: '124%', height: '132%' });
+  shadow.append(svgEl('feDropShadow', { dx: '0', dy: '2', stdDeviation: '2.5', 'flood-opacity': '0.09' }));
   defs.append(pattern);
+  defs.append(shadow);
   svg.append(defs);
   svg.append(svgEl('rect', { width, height, fill: 'url(#mesh-grid)' }));
 
@@ -49,43 +52,61 @@ function buildTopologyCanvas(topo) {
     pos.set(n.key, { x, y, node: n });
   });
 
-  // Curved quadratic Bezier links + pill RTT badges
-  for (const l of links) {
+  // Curved quadratic Bezier links + staggered collision-free pill RTT badges
+  const placedPills = [];
+  links.forEach((l, idx) => {
     const a = pos.get(l.a);
     const b = pos.get(l.b);
-    if (!a || !b) continue;
+    if (!a || !b) return;
     const mx = (a.x + b.x) / 2;
     const my = (a.y + b.y) / 2;
-    const pullX = Math.round(mx + (cx - mx) * 0.16);
-    const pullY = Math.round(my + (cy - my) * 0.16);
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const bend = (idx % 2 === 0 ? 1 : -1) * Math.min(26, len * 0.1);
+    const pullX = Math.round(mx + (-dy / len) * bend);
+    const pullY = Math.round(my + (dx / len) * bend);
+    const protoKey = String(l.proto || 'p2p').toLowerCase();
     svg.append(svgEl('path', {
       d: `M ${a.x} ${a.y} Q ${pullX} ${pullY} ${b.x} ${b.y}`,
-      class: 'topo-link',
+      class: `topo-link proto-${protoKey}`,
     }));
 
-    const lx = Math.round(0.25 * a.x + 0.5 * pullX + 0.25 * b.x);
-    const ly = Math.round(0.25 * a.y + 0.5 * pullY + 0.25 * b.y);
-    const textStr = `${(l.proto || 'p2p').toUpperCase()} · ${Number(l.rttMs || 0).toFixed(1)} ms`;
-    const pillW = Math.max(76, textStr.length * 6.4);
+    const t = [0.5, 0.36, 0.64, 0.43][idx % 4];
+    const omt = 1 - t;
+    let lx = Math.round(omt * omt * a.x + 2 * omt * t * pullX + t * t * b.x);
+    let ly = Math.round(omt * omt * a.y + 2 * omt * t * pullY + t * t * b.y);
+    const textStr = `${protoKey.toUpperCase()} · ${Number(l.rttMs || 0).toFixed(1)} ms`;
+    const pillW = Math.round(Math.max(80, textStr.length * 6.5));
+    for (const prev of placedPills) {
+      if (Math.abs(lx - prev.x) < (pillW + prev.w) / 2 + 4 && Math.abs(ly - prev.y) < 22) {
+        ly = ly >= prev.y ? prev.y + 23 : prev.y - 23;
+      }
+    }
+    placedPills.push({ x: lx, y: ly, w: pillW });
     svg.append(svgEl('rect', {
-      x: Math.round(lx - pillW / 2), y: ly - 10, width: Math.round(pillW), height: 19, rx: 9.5,
-      class: 'topo-pill-bg',
+      x: Math.round(lx - pillW / 2), y: ly - 10, width: pillW, height: 19, rx: 9.5,
+      class: 'topo-pill-bg', filter: 'url(#plate-shadow)',
     }));
     const label = svgEl('text', { x: lx, y: ly + 3.5, 'text-anchor': 'middle', class: 'topo-link-label' });
     label.textContent = textStr;
     svg.append(label);
-  }
+  });
 
-  // Multi-ring node markers + structured node plates
+  // Interactive clickable node markers + structured node plates
   for (const { x, y, node } of pos.values()) {
-    const g = svgEl('g', {});
+    const link = svgEl('a', {
+      href: `#nodes/${encodeURIComponent(node.key)}`,
+      class: 'topo-node-link',
+      'aria-label': `查看节点 ${node.name} 的三方能力对照详情`,
+    });
     if (node.online) {
-      g.append(svgEl('circle', { cx: x, cy: y, r: 22, class: 'topo-halo' }));
+      link.append(svgEl('circle', { cx: x, cy: y, r: 22, class: 'topo-halo' }));
     }
     if (node.canRelay) {
-      g.append(svgEl('circle', { cx: x, cy: y, r: 17, class: 'topo-relay-ring' }));
+      link.append(svgEl('circle', { cx: x, cy: y, r: 17, class: 'topo-relay-ring' }));
     }
-    g.append(svgEl('circle', {
+    link.append(svgEl('circle', {
       cx: x, cy: y, r: 11,
       class: node.online ? 'topo-node-online' : 'topo-node-offline',
     }));
@@ -94,18 +115,18 @@ function buildTopologyCanvas(topo) {
     const ipText = node.ip || '—';
     const plateW = Math.max(110, Math.max(titleText.length * 8.5, ipText.length * 7.2) + 20);
     const placeAbove = nodes.length > 1 && y < cy - 10;
-    const plateY = placeAbove ? y - 56 : y + 20;
-    g.append(svgEl('rect', {
-      x: Math.round(x - plateW / 2), y: plateY, width: Math.round(plateW), height: 36, rx: 7,
-      class: 'topo-plate',
+    const plateY = placeAbove ? y - 57 : y + 20;
+    link.append(svgEl('rect', {
+      x: Math.round(x - plateW / 2), y: plateY, width: Math.round(plateW), height: 36, rx: 8,
+      class: 'topo-plate', filter: 'url(#plate-shadow)',
     }));
     const nameEl = svgEl('text', { x, y: plateY + 15, 'text-anchor': 'middle', class: 'topo-node-name' });
     nameEl.textContent = titleText;
     const ipEl = svgEl('text', { x, y: plateY + 29, 'text-anchor': 'middle', class: 'topo-node-ip' });
     ipEl.textContent = ipText;
-    g.append(nameEl);
-    g.append(ipEl);
-    svg.append(g);
+    link.append(nameEl);
+    link.append(ipEl);
+    svg.append(link);
   }
 
   return el('div', { class: 'topo-frame' },
@@ -115,15 +136,19 @@ function buildTopologyCanvas(topo) {
         el('span', { class: 'legend-item' }, el('span', { class: 'status-dot warn' }), '支持对等跳板 (CanRelay)'),
         el('span', { class: 'legend-item' }, el('span', { class: 'status-dot' }), '离线成员'),
       ),
+      el('span', { class: 'muted' }, '点击任意节点可查看三方能力对照详情'),
     ),
     svg,
   );
 }
 
-function kpiCard(label, value, foot, iconClass) {
+function kpiCard(label, value, foot, iconClass, href = '') {
+  const titleNode = href
+    ? el('a', { class: 'card-link kpi-label', href }, label)
+    : el('span', { class: 'kpi-label' }, label);
   return el('article', { class: 'kpi-card' },
     el('div', { class: 'kpi-top' },
-      el('span', { class: 'kpi-label' }, label),
+      titleNode,
       el('span', { class: `kpi-glyph icon ${iconClass}`, 'aria-hidden': 'true' }),
     ),
     el('span', { class: 'kpi-value' }, value),
@@ -182,11 +207,11 @@ export async function renderOverview(container, navTo, updateChrome) {
     ),
 
     el('div', { class: 'kpi-grid' },
-      kpiCard('根信任状态', '已锁定', '所有者公钥已绑定', 'kpi-icon-trust'),
-      kpiCard('已签授权成员', String(counts.members || 0), auth ? '来自签名授权' : '尚未发布授权', 'kpi-icon-members'),
-      kpiCard('协调流在线', `${counts.membersOnline || 0} / ${counts.members || 0}`, '仅代表中心控制流心跳', 'kpi-icon-online'),
-      kpiCard('待审入网申请', String(counts.requests || 0), '核对公钥后可加入草稿', 'kpi-icon-requests'),
-      kpiCard('待签策略草稿', String(counts.drafts || 0), `可用申请码 ${counts.keysActive || 0} 个`, 'kpi-icon-drafts'),
+      kpiCard('根信任状态', '已锁定', '查看授权发布与历史记录', 'kpi-icon-trust', '#publish'),
+      kpiCard('已签授权成员', String(counts.members || 0), auth ? '点击筛选全部已签成员' : '尚未发布授权', 'kpi-icon-members', '#nodes/status:member'),
+      kpiCard('协调流在线', `${counts.membersOnline || 0} / ${counts.members || 0}`, '仅代表中心控制流心跳', 'kpi-icon-online', '#nodes/status:member'),
+      kpiCard('待审入网申请', String(counts.requests || 0), '点击核对公钥并加入草稿', 'kpi-icon-requests', '#requests'),
+      kpiCard('待签策略草稿', String(counts.drafts || 0), `可用申请码 ${counts.keysActive || 0} 个`, 'kpi-icon-drafts', '#policy'),
       kpiCard('中心密文中继', `${relay.clients || 0} 会话`, `转发 ${relay.frames || 0} 帧 (${fmtBytes(relay.bytes)})`, 'kpi-icon-relay'),
     ),
 
@@ -245,7 +270,15 @@ export async function openAddMemberModal(reqRow, navTo) {
     const cb = el('input', { type: 'checkbox', value: rt });
     return { cb, row: el('label', { class: 'checkbox-row' }, cb, el('code', {}, rt)) };
   });
-  const extraRoutes = el('input', { type: 'text', id: 'add-member-routes', placeholder: '额外批准 CIDR（可选，逗号分隔，出口填 0.0.0.0/0）' });
+  const extraRoutes = el('input', { type: 'text', id: 'add-member-routes', placeholder: '额外批准 CIDR（可选，逗号分隔）' });
+  const addExitChip = el('button', {
+    type: 'button', class: 'preset-chip',
+    onClick: () => {
+      const parts = extraRoutes.value.split(',').map((s) => s.trim()).filter(Boolean);
+      if (!parts.includes('0.0.0.0/0')) parts.push('0.0.0.0/0');
+      extraRoutes.value = parts.join(', ');
+    },
+  }, '＋ 填入全局出口 0.0.0.0/0');
   const errBox = el('div', { class: 'callout error icon-start', hidden: true });
 
   const form = el('form', {
@@ -317,6 +350,7 @@ export async function openAddMemberModal(reqRow, navTo) {
     el('div', { class: 'field' },
       el('label', { for: 'add-member-routes' }, '附加批准子网 / 出口路由'),
       extraRoutes,
+      el('div', { class: 'preset-row' }, addExitChip),
     ),
     el('div', { class: 'form-actions' },
       el('button', { type: 'button', class: 'btn secondary', onClick: closeModal, autofocus: true }, '取消'),
@@ -331,12 +365,11 @@ export async function renderRequests(container, navTo) {
   const tableMount = el('div', {});
   const pagerMount = el('div', { class: 'toolbar-row between' });
 
-  const searchInput = el('input', {
-    type: 'search',
+  const searchWidget = createSearchInput({
     placeholder: '搜索自报主机名、操作系统或节点公钥…',
-    'aria-label': '搜索入网申请',
-    onInput: () => {
-      state.q = searchInput.value.trim();
+    ariaLabel: '搜索入网申请',
+    onSearch: (q) => {
+      state.q = q;
       state.page = 1;
       load();
     },
@@ -416,7 +449,7 @@ export async function renderRequests(container, navTo) {
       el('button', { type: 'button', class: 'btn secondary btn-key icon-start', onClick: () => navTo('security') }, '管理入网申请码'),
     ),
     el('section', { class: 'card form-stack' },
-      el('div', { class: 'toolbar-row between' }, searchBox(searchInput)),
+      el('div', { class: 'toolbar-row between' }, searchWidget),
       tableMount,
       pagerMount,
     ),

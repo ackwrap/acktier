@@ -1,5 +1,5 @@
 import {
-  api, downloadFile, el, badge, callout, bindDropzone, copyableCode, fmtTime, toast, openModal, buildTabs,
+  api, downloadFile, el, badge, callout, bindDropzone, copyableCode, terminalSnippet, fmtTime, toast, openModal, closeModal, confirmModal, buildTabs,
 } from './api.js';
 import { confirmDiscardACL, renderACLEditor } from './acl_editor.js';
 import { parsePolicySource, readPublicArtifact } from './artifacts.js';
@@ -52,18 +52,167 @@ function renderDiffSummary(diff) {
   return el('div', { class: 'form-stack' }, ...items);
 }
 
-function terminalSnippet(commandText, label = '复制终端命令') {
-  const cmdId = `term-${Math.random().toString(36).slice(2, 9)}`;
-  return el('div', { class: 'terminal-box' },
-    el('div', { class: 'terminal-cmd' },
-      el('span', { class: 'terminal-glyph icon', 'aria-hidden': 'true' }),
-      el('code', { id: cmdId, dataset: { fullText: commandText } }, commandText),
+async function openEditDraftMemberModal(draft, member, onSaved) {
+  const detail = await api(`nodes/${encodeURIComponent(member.nodeKey)}`).catch(() => null);
+  const currentRoutes = new Set(member.routes || []);
+  const reportedExtra = (detail?.reported?.advertisedRoutes || []).filter((rt) => !currentRoutes.has(rt));
+
+  const nameIn = el('input', { type: 'text', id: 'edit-mem-name', required: true, value: member.name || '' });
+  const ip4In = el('input', { type: 'text', id: 'edit-mem-ip4', required: true, value: member.ipv4 || '' });
+  const ip6In = el('input', { type: 'text', id: 'edit-mem-ip6', placeholder: '可选，如 fd7a:115c:a1e0::11', value: member.ipv6 || '' });
+  const tagsIn = el('input', {
+    type: 'text', id: 'edit-mem-tags', placeholder: '逗号分隔，如 tag:dev, tag:server',
+    value: (member.tags || []).join(', '),
+  });
+  const routesIn = el('input', {
+    type: 'text', id: 'edit-mem-routes', placeholder: '逗号分隔 CIDR，如 192.168.10.0/24',
+    value: (member.routes || []).join(', '),
+  });
+  const extraChecks = reportedExtra.map((rt) => {
+    const cb = el('input', { type: 'checkbox', value: rt });
+    return { cb, row: el('label', { class: 'checkbox-row' }, cb, el('code', {}, rt), el('span', { class: 'muted' }, '（节点最新自报）')) };
+  });
+  const exitBtn = el('button', {
+    type: 'button', class: 'preset-chip',
+    onClick: () => {
+      const list = routesIn.value.split(',').map((s) => s.trim()).filter(Boolean);
+      if (!list.includes('0.0.0.0/0')) list.push('0.0.0.0/0');
+      routesIn.value = list.join(', ');
+    },
+  }, '＋ 填入全局出口 0.0.0.0/0');
+  const errBox = el('div', { class: 'callout error icon-start', hidden: true });
+
+  const form = el('form', {
+    class: 'form-stack',
+    onSubmit: async (e) => {
+      e.preventDefault();
+      errBox.hidden = true;
+      const name = nameIn.value.trim().toLowerCase();
+      if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)) {
+        errBox.textContent = '唯一名称仅允许小写字母、数字和连字符，且不能以连字符开头或结尾。';
+        errBox.hidden = false;
+        return;
+      }
+      const tags = tagsIn.value.split(',').map((s) => s.trim()).filter(Boolean);
+      if (tags.some((t) => !/^tag:[a-zA-Z0-9_-]+$/.test(t))) {
+        errBox.textContent = '所有标签必须以 tag: 开头（例如 tag:dev）。';
+        errBox.hidden = false;
+        return;
+      }
+      const routes = [...new Set([
+        ...routesIn.value.split(',').map((s) => s.trim()).filter(Boolean),
+        ...extraChecks.filter((x) => x.cb.checked).map((x) => x.cb.value),
+      ])];
+      try {
+        const nextPol = structuredClone(draft.policy);
+        const idx = nextPol.members.findIndex((m) => m.nodeKey === member.nodeKey);
+        if (idx < 0) throw new Error('草稿中未找到该成员。');
+        const updatedMember = {
+          ...nextPol.members[idx],
+          name,
+          ipv4: ip4In.value.trim(),
+          tags,
+          routes,
+        };
+        const ip6 = ip6In.value.trim();
+        if (ip6) updatedMember.ipv6 = ip6;
+        else delete updatedMember.ipv6;
+        nextPol.members[idx] = updatedMember;
+        await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: nextPol, requireValid: true } });
+        closeModal();
+        toast(`已更新草稿成员 ${name}`);
+        onSaved();
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.hidden = false;
+      }
+    },
+  },
+    errBox,
+    el('div', { class: 'field' }, el('label', {}, `节点公钥（成员 #${member.id}）`), copyableCode(member.nodeKey, '复制成员公钥')),
+    el('div', { class: 'form-row' },
+      el('div', { class: 'field' }, el('label', { for: 'edit-mem-name' }, '唯一 DNS 名称'), nameIn),
+      el('div', { class: 'field' }, el('label', { for: 'edit-mem-ip4' }, '虚拟 IPv4'), ip4In),
     ),
-    el('span', { class: 'copy' },
-      el('button', { type: 'button', class: 'copy-button icon-start', command: '--copy', commandfor: cmdId, 'aria-label': label }, '复制'),
-      el('span', { class: 'tip', role: 'status' }),
+    el('div', { class: 'field' }, el('label', { for: 'edit-mem-ip6' }, '虚拟 IPv6（可选）'), ip6In),
+    el('div', { class: 'field' }, el('label', { for: 'edit-mem-tags' }, '授权标签 (ACL)'), tagsIn),
+    extraChecks.length
+      ? el('div', { class: 'field' }, el('label', {}, '勾选并入节点自报的新网段'), ...extraChecks.map((x) => x.row))
+      : null,
+    el('div', { class: 'field' },
+      el('label', { for: 'edit-mem-routes' }, '已批准子网 / 出口路由'),
+      routesIn,
+      el('div', { class: 'preset-row' }, exitBtn),
+    ),
+    el('div', { class: 'form-actions' },
+      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, '取消'),
+      el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, '保存成员变更'),
     ),
   );
+  openModal(`编辑草稿成员 · ${member.name}`, form);
+}
+
+function openDraftMetaModal({ mode, draft, onTriggerImport, onDone }) {
+  const isCreate = mode === 'create';
+  const nameIn = el('input', {
+    type: 'text', id: 'draft-meta-name', maxlength: 64, required: true,
+    value: isCreate ? '策略变更草稿' : (draft?.name || ''),
+    placeholder: '例如：广州研发节点准入',
+    autofocus: true,
+  });
+  const noteIn = el('input', {
+    type: 'text', id: 'draft-meta-note', maxlength: 240,
+    value: isCreate ? '' : (draft?.note || ''),
+    placeholder: '可选备注：记录本次变更目的',
+  });
+  const errBox = el('div', { class: 'callout error icon-start', hidden: true });
+  const importFallbackBtn = el('button', {
+    type: 'button', class: 'btn secondary sm btn-upload icon-start', hidden: true,
+    onClick: () => { closeModal(); onTriggerImport?.(); },
+  }, '直接导入完整 policy.json');
+
+  const form = el('form', {
+    class: 'form-stack',
+    onSubmit: async (e) => {
+      e.preventDefault();
+      errBox.hidden = true;
+      importFallbackBtn.hidden = true;
+      try {
+        if (isCreate) {
+          const created = await api('drafts', {
+            method: 'POST',
+            body: { name: nameIn.value.trim(), note: noteIn.value.trim(), fromActive: true },
+          });
+          closeModal();
+          toast('已创建新策略草稿');
+          onDone(created.draft.id);
+        } else {
+          await api(`drafts/${encodeURIComponent(draft.id)}`, {
+            method: 'PUT',
+            body: { name: nameIn.value.trim(), note: noteIn.value.trim() },
+          });
+          closeModal();
+          toast('草稿名称与备注已更新');
+          onDone(draft.id);
+        }
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.hidden = false;
+        if (err.code === 'policy_source_required') importFallbackBtn.hidden = false;
+      }
+    },
+  },
+    errBox,
+    importFallbackBtn,
+    el('div', { class: 'field' }, el('label', { for: 'draft-meta-name' }, '草稿名称'), nameIn),
+    el('div', { class: 'field' }, el('label', { for: 'draft-meta-note' }, '变更备注（可选）'), noteIn),
+    el('div', { class: 'form-actions' },
+      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, '取消'),
+      el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, isCreate ? '创建草稿' : '保存信息'),
+    ),
+  );
+  openModal(isCreate ? '新建策略草稿' : '编辑草稿名称与备注', form);
+  requestAnimationFrame(() => nameIn.select());
 }
 
 export async function renderPolicy(container, navTo, refreshGlobal, initialDraftId = '') {
@@ -136,12 +285,35 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     if (seq !== workspaceSeq || id !== selectedId) return;
     const { draft, analysis } = data;
     const pol = draft.policy;
+    let tabsRef = null;
 
     const issuesNodes = (analysis.issues || []).map(({ level, message }) => {
-      const text = level === 'warning' && analysis.baseStale
+      const isStaleWarn = level === 'warning' && analysis.baseStale;
+      const text = isStaleWarn
         ? message.replace(/^草稿基于 v\d+，当前生效的是 v\d+。/, '草稿建立后，生效策略已有更新。')
         : message;
-      return callout(level === 'error' ? 'error' : 'warn', `${level === 'error' ? '校验错误：' : '核对提示：'}${text}`);
+      if (!isStaleWarn) {
+        return callout(level === 'error' ? 'error' : 'warn', `${level === 'error' ? '校验错误：' : '核对提示：'}${text}`);
+      }
+      return el('div', { class: 'callout warn icon-start toolbar-row between' },
+        el('span', {}, `核对提示：${text}`),
+        el('div', { class: 'toolbar-row' },
+          el('button', { type: 'button', class: 'btn ghost sm', onClick: () => tabsRef?.select('diff', true) }, '查看差异'),
+          el('button', {
+            type: 'button', class: 'btn secondary sm btn-check icon-start',
+            onClick: async () => {
+              if (!confirmDiscardACL(workspaceMount)) return;
+              await api(`drafts/${encodeURIComponent(draft.id)}`, {
+                method: 'PUT',
+                body: { name: draft.name, note: draft.note || '', rebase: true },
+              });
+              toast('已确认对齐最新基准');
+              await reloadSidebar();
+              if (seq === workspaceSeq) loadDraftWorkspace();
+            },
+          }, '已核对，更新基准'),
+        ),
+      );
     });
 
     // Members & DNS/STUN
@@ -152,7 +324,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
 
     const membersTab = el('div', { class: 'form-stack' },
       el('div', { class: 'toolbar-row between' },
-        el('span', { class: 'muted' }, '可从「入网申请」核对设备公钥加入，或在此移除撤权成员。'),
+        el('span', { class: 'muted' }, '可直接编辑草稿内成员的名称、标签和批准路由，或从「入网申请」添加新节点。'),
         el('button', { type: 'button', class: 'btn secondary sm btn-plus icon-start', onClick: () => navTo('requests') }, '前往入网申请添加节点'),
       ),
       (pol.members || []).length
@@ -172,21 +344,44 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               el('td', {}, el('code', {}, m.ipv4), m.ipv6 ? el('div', {}, el('code', {}, m.ipv6)) : null),
               el('td', {}, copyableCode(m.nodeKey, '复制成员公钥', true)),
               el('td', {},
-                el('div', { class: 'chip-list' },
-                  ...(m.tags || []).map((t) => el('code', { class: 'chip' }, t)),
-                  ...(m.routes || []).map((rt) => el('code', { class: 'chip' }, rt)),
+                (m.tags || []).length || (m.routes || []).length
+                  ? el('div', { class: 'chip-list' },
+                    ...(m.tags || []).map((t) => el('code', { class: 'chip' }, t)),
+                    ...(m.routes || []).map((rt) => el('code', { class: 'chip' }, rt)),
+                  )
+                  : el('span', { class: 'muted' }, '—'),
+              ),
+              el('td', {},
+                el('div', { class: 'toolbar-row' },
+                  el('button', {
+                    type: 'button', class: 'btn secondary sm',
+                    onClick: () => {
+                      if (!confirmDiscardACL(workspaceMount)) return;
+                      openEditDraftMemberModal(draft, m, () => {
+                        reloadSidebar();
+                        if (seq === workspaceSeq) loadDraftWorkspace('members');
+                      });
+                    },
+                  }, '编辑'),
+                  el('button', {
+                    type: 'button', class: 'btn danger sm btn-trash icon-start',
+                    onClick: async () => {
+                      if (!confirmDiscardACL(workspaceMount)) return;
+                      const ok = await confirmModal({
+                        title: '从草稿移除成员',
+                        message: `确认从草稿「${draft.name}」中移除成员 ${m.name} (#${m.id}) 吗？`,
+                        detail: '此操作只修改当前草稿；签发并发布新授权后该节点才会失去组网权限。',
+                        confirmText: '确认移除',
+                      });
+                      if (!ok) return;
+                      await api(`drafts/${encodeURIComponent(draft.id)}/members/${encodeURIComponent(m.nodeKey)}`, { method: 'DELETE' });
+                      toast(`已从草稿移除成员 ${m.name}`);
+                      reloadSidebar();
+                      if (seq === workspaceSeq) loadDraftWorkspace('members');
+                    },
+                  }, '移除'),
                 ),
               ),
-              el('td', {}, el('button', {
-                 type: 'button', class: 'btn danger sm btn-trash icon-start',
-                 onClick: async () => {
-                   if (!confirmDiscardACL(workspaceMount)) return;
-                   await api(`drafts/${encodeURIComponent(draft.id)}/members/${encodeURIComponent(m.nodeKey)}`, { method: 'DELETE' });
-                   toast(`已从草稿移除成员 ${m.name}`);
-                   reloadSidebar();
-                   if (seq === workspaceSeq) loadDraftWorkspace('members');
-                },
-              }, '移除')),
             ))),
           ),
         )
@@ -202,17 +397,17 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
         ),
         el('div', { class: 'form-actions' },
           el('button', {
-             type: 'button', class: 'btn primary sm btn-check icon-start',
-             onClick: async () => {
-               if (!confirmDiscardACL(workspaceMount)) return;
+            type: 'button', class: 'btn primary sm btn-check icon-start',
+            onClick: async () => {
+              if (!confirmDiscardACL(workspaceMount)) return;
               const nextPol = structuredClone(pol);
               nextPol.dns = { enableMagicDNS: dnsEnable.checked, magicDNSSuffix: dnsSuffix.value.trim(), nameservers: pol.dns?.nameservers };
               nextPol.stunAddr = stun1.value.trim();
               nextPol.stunAltAddr = stun2.value.trim();
               await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: nextPol } });
-               toast('DNS 与 STUN 设置已更新到草稿');
-               reloadSidebar();
-               if (seq === workspaceSeq) loadDraftWorkspace('members');
+              toast('DNS 与 STUN 设置已更新到草稿');
+              reloadSidebar();
+              if (seq === workspaceSeq) loadDraftWorkspace('members');
             },
           }, '保存 DNS / STUN 到草稿'),
         ),
@@ -220,7 +415,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     );
 
     const exportButtons = [];
-    const pendingNotice = el('p', { class: 'callout warn', hidden: true }, 'ACL 有未保存的改动。请返回「ACL 规则」保存后再对比和导出。');
+    const pendingNotice = el('p', { class: 'callout warn icon-start', hidden: true }, 'ACL 有未保存的改动。请返回「ACL 规则」保存后再对比和导出。');
     const diffPreview = el('div', { class: 'form-stack' },
       renderDiffSummary(analysis.diff),
       renderRuleTable(analysis.rules, '待签发包过滤规则表'),
@@ -283,13 +478,13 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
         el('button', {
           type: 'button', class: 'btn primary btn-check icon-start',
           onClick: async () => {
-             try {
-               const candidate = parsePolicySource(fullEditor.value);
-               if (!confirmDiscardACL(workspaceMount)) return;
-               await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: candidate } });
-               toast('完整策略草稿已保存');
-               reloadSidebar();
-               if (seq === workspaceSeq) loadDraftWorkspace('json');
+            try {
+              const candidate = parsePolicySource(fullEditor.value);
+              if (!confirmDiscardACL(workspaceMount)) return;
+              await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: candidate } });
+              toast('完整策略草稿已保存');
+              reloadSidebar();
+              if (seq === workspaceSeq) loadDraftWorkspace('json');
             } catch (err) {
               fullMsg.className = 'callout error icon-start';
               fullMsg.textContent = err.message;
@@ -331,7 +526,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
       ),
     );
 
-    const tabs = buildTabs('策略草稿工作区', [
+    tabsRef = buildTabs('策略草稿工作区', [
       { id: 'acl', title: 'ACL 规则', content: aclTab },
       { id: 'members', title: `成员与路由 (${pol.members?.length || 0})`, content: membersTab },
       { id: 'diff', title: '差异对比与导出', content: diffTab },
@@ -346,15 +541,39 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               el('h2', {}, draft.name),
               analysis.valid ? badge('校验通过', 'ok') : badge('存在错误', 'err'),
             ),
-            el('span', { class: 'muted' }, `最后保存：${fmtTime(draft.updatedAt)}`),
+            el('span', { class: 'muted' },
+              draft.note ? `${draft.note} · ` : '',
+              `最后保存：${fmtTime(draft.updatedAt)}`,
+            ),
           ),
           el('div', { class: 'toolbar-row' },
+            el('button', {
+              type: 'button', class: 'btn ghost sm',
+              onClick: () => {
+                if (!confirmDiscardACL(workspaceMount)) return;
+                openDraftMetaModal({
+                  mode: 'edit',
+                  draft,
+                  onDone: async () => {
+                    await reloadSidebar();
+                    if (seq === workspaceSeq) loadDraftWorkspace();
+                  },
+                });
+              },
+            }, '改名 / 备注'),
             exportButton('导出 policy.json', 'sm'),
             el('button', {
-               type: 'button', class: 'btn danger sm btn-trash icon-start',
-               onClick: async () => {
-                 if (!confirmDiscardACL(workspaceMount)) return;
-                 await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'DELETE' });
+              type: 'button', class: 'btn danger sm btn-trash icon-start',
+              onClick: async () => {
+                if (!confirmDiscardACL(workspaceMount)) return;
+                const ok = await confirmModal({
+                  title: '删除策略草稿',
+                  message: `确认永久删除草稿「${draft.name}」吗？`,
+                  detail: '删除草稿不会影响线上已发布的授权快照，但草稿内未导出的修改将无法恢复。',
+                  confirmText: '确认删除草稿',
+                });
+                if (!ok) return;
+                await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'DELETE' });
                 selectedId = '';
                 toast('草稿已删除');
                 await reloadSidebar();
@@ -364,7 +583,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
           ),
         ),
         ...issuesNodes,
-        tabs.root,
+        tabsRef.root,
       ),
     );
     if (afterACLSave) aclTab.querySelector('h3').focus({ preventScroll: true });
@@ -407,17 +626,17 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
           onClick: () => { if (confirmDiscardACL(workspaceMount)) importFullInput.click(); } }, '导入完整 policy.json'),
         el('button', {
           type: 'button', class: 'btn primary btn-plus icon-start',
-          onClick: async () => {
+          onClick: () => {
             if (!confirmDiscardACL(workspaceMount)) return;
-            try {
-              const created = await api('drafts', { method: 'POST', body: { fromActive: true } });
-              selectedId = created.draft.id;
-              toast('已创建新策略草稿');
-              await reloadSidebar();
-              await loadDraftWorkspace();
-            } catch (err) {
-              toast(err.message);
-            }
+            openDraftMetaModal({
+              mode: 'create',
+              onTriggerImport: () => importFullInput.click(),
+              onDone: async (newId) => {
+                selectedId = newId;
+                await reloadSidebar();
+                await loadDraftWorkspace();
+              },
+            });
           },
         }, '新建草稿'),
       ),

@@ -18,12 +18,12 @@
 }
 
 .acl-rule-count {
-  padding: 0.08rem 0.48rem;
+  padding: 0.08rem 0.5rem;
   border: 1px solid var(--border);
   border-radius: 99px;
   background: var(--surface-subtle);
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.74rem;
   font-weight: 600;
 }
 
@@ -35,13 +35,13 @@
 }
 
 .acl-rule-table th, .acl-rule-table td {
-  padding-inline: 0.7rem;
+  padding-inline: 0.75rem;
 }
 
 .acl-rule-heading, .acl-row-actions, .acl-target-label, .acl-selector-label {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.38rem;
   flex-wrap: wrap;
 }
 
@@ -50,13 +50,21 @@
 }
 
 .acl-order {
-  min-inline-size: 1.25rem;
+  display: inline-grid;
+  place-items: center;
+  min-inline-size: 1.4rem;
+  block-size: 1.4rem;
+  border-radius: 0.35rem;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
   color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
 }
 
 .acl-selector-list {
   display: grid;
-  gap: 0.3rem;
+  gap: 0.32rem;
 }
 
 .acl-selector-label {
@@ -64,26 +72,41 @@
 }
 
 .acl-port-label {
+  padding: 0.06rem 0.4rem;
+  border-radius: 0.3rem;
+  background: var(--surface-subtle);
   color: var(--muted);
-  font-size: 0.78rem;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.75rem;
   overflow-wrap: anywhere;
 }
 
 .acl-row-actions {
-  gap: 0.1rem;
+  display: inline-flex;
+  gap: 0.2rem;
+  padding: 0.16rem;
+  border-radius: 0.5rem;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
 }
 
 .acl-row-actions .btn {
   min-inline-size: 1.85rem;
-  padding-inline: 0.34rem;
+  min-block-size: 1.7rem;
+  padding-inline: 0.45rem;
+  border-radius: 0.38rem;
+}
+
+.acl-row-actions .btn:hover:not([aria-disabled="true"]) {
+  background: var(--surface);
 }
 
 .acl-row-actions .acl-move-rule {
-  font-size: 1rem;
+  font-size: 0.92rem;
 }
 
 .acl-editor .btn[aria-disabled="true"] {
-  opacity: 0.5;
+  opacity: 0.42;
   cursor: not-allowed;
 }
 
@@ -108,14 +131,21 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.65rem;
-  padding: 0.7rem 0.85rem;
+  padding: 0.75rem 0.95rem;
   border: 1px solid var(--border);
-  border-radius: 0.65rem;
-  background: var(--surface-subtle);
+  border-radius: 0.7rem;
+  background: color-mix(in oklab, var(--surface-subtle), var(--surface) 35%);
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.acl-editor[data-acl-dirty] .acl-savebar {
+  border-color: color-mix(in oklab, var(--warn-border), transparent 35%);
+  border-inline-start: 3px solid var(--warn-border);
+  background: color-mix(in oklab, var(--warn-bg), var(--surface) 74%);
 }
 
 .acl-status {
-  color: var(--muted);
+  color: var(--text);
   font-size: 0.86rem;
   font-weight: 600;
 }
@@ -127,20 +157,27 @@
 .acl-details {
   min-inline-size: 0;
   border: 1px solid var(--border);
-  border-radius: 0.65rem;
+  border-radius: 0.7rem;
+  background: var(--surface);
+  overflow: clip;
 }
 
 .acl-details summary {
-  padding: 0.72rem 0.85rem;
-  cursor: pointer;
+  padding: 0.72rem 0.95rem;
   font-size: 0.85rem;
   font-weight: 600;
+  transition: background-color 0.12s;
+}
+
+.acl-details summary:hover {
+  background: var(--surface-subtle);
 }
 
 .acl-details-body {
   min-inline-size: 0;
-  padding: 0.85rem;
+  padding: 0.95rem;
   border-block-start: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface-subtle), var(--surface) 55%);
 }
 
 .acl-rule-form {
@@ -150,14 +187,15 @@
 .acl-form-section {
   min-inline-size: 0;
   margin: 0;
-  padding: 0.7rem 0.8rem 0.8rem;
+  padding: 0.8rem 0.9rem 0.9rem;
   border: 1px solid var(--border);
-  border-radius: 0.65rem;
+  border-radius: 0.7rem;
+  background: color-mix(in oklab, var(--surface-subtle), var(--surface) 55%);
 }
 
 .acl-form-section legend {
-  padding-inline: 0.3rem;
-  font-size: 0.87rem;
+  padding-inline: 0.35rem;
+  font-size: 0.86rem;
   font-weight: 700;
 }
 
@@ -169,18 +207,41 @@
   margin-block-start: 0.6rem;
 }
 
+/* Choice-card radio buttons (constant 2px border to prevent layout jump) */
 .acl-action-options {
-  display: flex;
-  gap: 0.8rem;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.65rem;
 }
 
 .acl-action-options label {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.1rem 0.5rem;
+  gap: 0.5rem;
+  padding: 0.55rem 0.8rem;
+  border-radius: 0.6rem;
+  border: 2px solid var(--border);
+  background: var(--surface);
+  font-weight: 600;
+  font-size: 0.88rem;
   cursor: pointer;
+  transition: border-color 0.12s, background-color 0.12s;
+}
+
+.acl-action-options label:hover {
+  border-color: var(--border-strong);
+}
+
+.acl-action-options label:has(> input[value="accept"]:checked) {
+  border-color: var(--ok-border);
+  background: color-mix(in oklab, var(--ok-bg), var(--surface) 55%);
+  color: var(--ok-fg);
+}
+
+.acl-action-options label:has(> input[value="drop"]:checked) {
+  border-color: var(--err-border);
+  background: color-mix(in oklab, var(--err-bg), var(--surface) 55%);
+  color: var(--err-fg);
 }
 
 .acl-form-list, .acl-picker {
