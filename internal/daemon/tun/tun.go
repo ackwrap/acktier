@@ -9,6 +9,16 @@ import (
 
 const DefaultMTU = 1280 // Fits within a 1500-byte IPv6/UDP packet after AEAD and authenticated mesh wrapping.
 
+// DefaultInterfaceName is the default system TUN name on Linux and Windows.
+const DefaultInterfaceName = "acktier"
+
+func interfaceNameOrDefault(name string) string {
+	if name == "" {
+		return DefaultInterfaceName
+	}
+	return name
+}
+
 // Device abstracts an OS virtual network interface (Wintun, Linux /dev/net/tun, macOS utun) or in-memory test NIC.
 type Device interface {
 	Name() string

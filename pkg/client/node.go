@@ -68,7 +68,7 @@ type NodeConfig struct {
 	Hostname  string
 
 	TUNMode       TUNMode
-	InterfaceName string
+	InterfaceName string // System TUN name on Linux/Windows (empty uses "acktier"); macOS assigns utunN.
 	MTU           int
 	CustomTUN     PacketDevice
 
@@ -105,6 +105,7 @@ func DefaultNodeConfig(statePath string) NodeConfig {
 	return NodeConfig{
 		StatePath:          statePath,
 		TUNMode:            TUNAuto,
+		InterfaceName:      tun.DefaultInterfaceName,
 		MTU:                tun.DefaultMTU,
 		UDPListenAddr:      "0.0.0.0:0",
 		TCPListenAddr:      "0.0.0.0:0",

@@ -55,6 +55,8 @@ go build -o bin/ ./cmd/...
 
 在管理台查看申请；在所有者电脑核对公钥并签发，然后回到管理台上传 `authorization.json`。节点再运行 `acktier up`。完整步骤和策略样例见[所有者架构](docs/OWNER_CONTROL.md)。
 
+Linux 和 Windows 创建的系统虚拟网卡默认名为 `acktier`，可用 `-ifname` 覆盖。同机运行多个系统网卡实例时，为各实例指定不同名称。macOS 使用系统分配的 `utunN`；`-tun memory` 不创建系统网卡。
+
 ### 安全配置与升级
 
 - 非回环控制/中心中继连接使用证书验证的 TLS。服务端配置 `-tls-cert`、`-tls-key`，节点使用与证书匹配的控制端 URL；使用私有 CA 时指定 `-tls-ca`。不要在生产使用 `-insecure-http` 或 `-insecure-remote-api`。

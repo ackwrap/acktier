@@ -44,9 +44,7 @@ type windowsTUN struct {
 
 // CreateOSDevice dynamically loads wintun.dll and creates an L3 Wintun adapter on Windows.
 func CreateOSDevice(ifName string, mtu int) (Device, error) {
-	if ifName == "" {
-		ifName = "AckTier"
-	}
+	ifName = interfaceNameOrDefault(ifName)
 	if mtu <= 0 {
 		mtu = DefaultMTU
 	}

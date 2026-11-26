@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	cIFFTUN   = 0x0001
-	cIFFNOPI  = 0x1000
+	cIFFTUN    = 0x0001
+	cIFFNOPI   = 0x1000
 	cTUNSETIFF = 0x400454ca
 )
 
@@ -32,9 +32,7 @@ type linuxTUN struct {
 
 // CreateOSDevice opens a native Linux /dev/net/tun interface.
 func CreateOSDevice(ifName string, mtu int) (Device, error) {
-	if ifName == "" {
-		ifName = "acktier0"
-	}
+	ifName = interfaceNameOrDefault(ifName)
 	if mtu <= 0 {
 		mtu = DefaultMTU
 	}

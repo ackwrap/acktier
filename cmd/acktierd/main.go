@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ackwrap/acktier/internal/daemon/localapi"
+	"github.com/ackwrap/acktier/internal/daemon/tun"
 	"github.com/ackwrap/acktier/pkg/client"
 	"github.com/ackwrap/acktier/pkg/types"
 )
@@ -43,7 +44,7 @@ func main() {
 		enableUPnP        = flag.Bool("upnp", true, "Enable UPnP IGD & NAT-PMP automatic port mapping")
 		enableLANDis      = flag.Bool("lan-discovery", true, "Enable L2 LAN peer discovery beacons")
 		tunMode           = flag.String("tun", "auto", "TUN device mode: auto | os | memory")
-		ifName            = flag.String("ifname", "", "Custom virtual network interface name")
+		ifName            = flag.String("ifname", tun.DefaultInterfaceName, "System TUN name on Linux and Windows (macOS assigns utunN)")
 		relayMode         = flag.String("relay-mode", "auto", "Peer relay mode: auto (public IP auto-enables) | on | off")
 		maxRelayMbps      = flag.Float64("relay-max-mbps", 0, "Optional transit relay bandwidth limit in Mbps (0 = unlimited)")
 		canRelay          = flag.Bool("can-relay", false, "Force enable peer relay (alias for -relay-mode=on)")
