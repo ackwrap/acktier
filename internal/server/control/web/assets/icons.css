@@ -133,13 +133,6 @@
 }
 
 /* Semantic Component Icon Assignments (CSP-safe: zero inline style="") */
-.nav-item[data-route="overview"] .nav-label { --icon-start: var(--icon-radar); }
-.nav-item[data-route="requests"] .nav-label { --icon-start: var(--icon-inbox); }
-.nav-item[data-route="nodes"] .nav-label { --icon-start: var(--icon-server); }
-.nav-item[data-route="policy"] .nav-label { --icon-start: var(--icon-sliders); }
-.nav-item[data-route="publish"] .nav-label { --icon-start: var(--icon-rocket); }
-.nav-item[data-route="security"] .nav-label { --icon-start: var(--icon-key); }
-
 .btn-refresh { --icon-start: var(--icon-refresh); }
 .btn-theme { --icon-start: var(--icon-theme); }
 .btn-logout { --icon-start: var(--icon-logout); }
@@ -179,4 +172,3 @@
 .dropzone:has(input[aria-invalid="true"]) .dropzone-glyph { --icon: var(--icon-error); }
 .search-glyph { --icon: var(--icon-search); }
 .terminal-glyph { --icon: var(--icon-terminal); }
-.trust-glyph { --icon: var(--icon-lock); }

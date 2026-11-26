@@ -99,8 +99,8 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
             el('strong', {}, d.name),
             d.valid ? badge('有效', 'ok') : badge('待修正', 'err'),
           ),
-          el('span', { class: 'muted' }, `基准 v${d.baseVersion} · ${d.members} 成员 · ${d.aclRules} ACL`),
-          d.baseStale ? badge('基准版本落后', 'warn') : null,
+          el('span', { class: 'muted' }, `${d.members} 成员 · ${d.aclRules} 条 ACL`),
+          d.baseStale ? badge('需核对变更', 'warn') : null,
         ))
         : [el('div', { class: 'empty-state' }, '尚无草稿，请点击右上角新建或导入。')]),
     );
@@ -112,9 +112,9 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     if (!selectedId) {
       workspaceMount.replaceChildren(
         el('section', { class: 'card form-stack' },
-          el('h2', {}, '当前生效的已签规则（只读）'),
+          el('h2', {}, '已发布的签名规则（只读）'),
           activeData.hasActive
-            ? renderRuleTable(activeData.rules, `生效版本 v${activeData.authorization.version} 的编译包过滤表`)
+            ? renderRuleTable(activeData.rules, '签名授权的包过滤规则')
             : el('div', { class: 'empty-state' }, '当前尚未发布任何已签策略。请点击右上角「新建草稿」开始编排成员与 ACL。'),
         ),
       );
@@ -134,10 +134,12 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     const { draft, analysis } = data;
     const pol = draft.policy;
 
-    const issuesNodes = (analysis.issues || []).map((is) => callout(
-      is.level === 'error' ? 'error' : 'warn',
-      `${is.level === 'error' ? '校验错误：' : '核对提示：'}${is.message}`,
-    ));
+    const issuesNodes = (analysis.issues || []).map(({ level, message }) => {
+      const text = level === 'warning' && analysis.baseStale
+        ? message.replace(/^草稿基于 v\d+，当前生效的是 v\d+。/, '草稿建立后，生效策略已有更新。')
+        : message;
+      return callout(level === 'error' ? 'error' : 'warn', `${level === 'error' ? '校验错误：' : '核对提示：'}${text}`);
+    });
 
     // Tab 1: Members & DNS/STUN
     const dnsEnable = el('input', { type: 'checkbox', checked: !!pol.dns?.enableMagicDNS });
@@ -316,7 +318,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               fullMsg.className = `callout ${res.valid ? 'ok' : 'error'} icon-start`;
               fullMsg.textContent = res.valid
                 ? `预校验通过：将生成 ${res.rules?.length || 0} 条包过滤规则（提示数：${res.issues?.length || 0}）。`
-                : '预校验未通过：' + (res.issues?.[0]?.message || '存在错误');
+                : '预校验未通过：' + (res.issues?.find((issue) => issue.level === 'error')?.message || '存在错误');
               fullMsg.hidden = false;
             } catch (err) {
               fullMsg.className = 'callout error icon-start';
@@ -351,7 +353,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
       renderRuleTable(analysis.rules, '待签发包过滤规则表'),
       el('div', { class: 'card form-stack' },
         el('h3', {}, '导出待签文件并在所有者客户端离线签发'),
-        el('p', { class: 'muted' }, '网页与中心服务器均无私钥签名能力。请导出下方 JSON，在所有者电脑核对成员公钥与变更后执行签名命令，再前往「签名发布与历史」上传生成的 authorization.json：'),
+        el('p', { class: 'muted' }, '网页与中心服务器均无私钥签名能力。请导出下方 JSON，在所有者电脑核对成员公钥与变更后执行签名命令，再前往「签名发布」上传生成的 authorization.json：'),
         terminalSnippet(signCmd, '复制本地签名命令'),
         el('div', { class: 'form-actions' },
           el('button', {
@@ -383,7 +385,6 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
           el('div', {},
             el('div', { class: 'toolbar-row' },
               el('h2', {}, draft.name),
-              badge(`基准版本 v${draft.baseVersion}`, 'neutral'),
               analysis.valid ? badge('校验通过', 'ok') : badge('存在错误', 'err'),
             ),
             el('span', { class: 'muted' }, `草稿 ID: ${draft.id} · 最后保存：${fmtTime(draft.updatedAt)}`),
@@ -489,10 +490,10 @@ export async function renderPublish(container, navTo, refreshGlobal) {
       fileInput.disabled = true;
       try {
         const res = await api('authorization', { method: 'POST', body: stagedEnvelope });
-        toast(res.idempotent ? `快照 v${res.version} 幂等确认成功` : `已验证并发布签名授权 v${res.version}！`);
+        toast(res.idempotent ? '这份授权已发布，无需重复提交。' : '签名授权已发布。');
         stagedEnvelope = null;
         publishBtn.disabled = true;
-        previewMount.replaceChildren(callout('ok', `签名快照 v${res.version} 已持久化并实时推送给全部在线节点。`));
+        previewMount.replaceChildren(callout('ok', '签名授权已持久化，在线节点将收到更新。'));
         refreshGlobal();
         loadHistory();
       } catch (err) {
@@ -504,8 +505,10 @@ export async function renderPublish(container, navTo, refreshGlobal) {
     },
   }, '确认验证并发布到全网');
 
-  const dzTitle = el('span', { class: 'dropzone-title' }, '点击选择或拖拽已签 authorization.json 到此处');
-  const dzSub = el('span', { class: 'dropzone-sub' }, '中心将严格校验 Ed25519 签名、组网指纹、防回滚版本号与有效期，原样保留签名封套');
+  const uploadTitle = '点击选择或拖拽已签 authorization.json 到此处';
+  const uploadHint = '中心校验签名、组网指纹和有效期，拒绝旧快照，原样保存签名文件。';
+  const dzTitle = el('span', { class: 'dropzone-title' }, uploadTitle);
+  const dzSub = el('span', { class: 'dropzone-sub' }, uploadHint);
 
   const fileInput = el('input', {
     type: 'file', id: 'auth-upload-input', accept: '.json,application/json', 'aria-describedby': 'auth-upload-alert',
@@ -526,7 +529,7 @@ export async function renderPublish(container, navTo, refreshGlobal) {
         if (!prev.valid) {
           dropzone.classList.remove('has-file');
           previewMount.replaceChildren(
-            callout('error', el('strong', {}, '验签或版本检查未通过：'), prev.reason || '未知错误'),
+            callout('error', el('strong', {}, '授权检查未通过：'), prev.reason || '未知错误'),
             ...(prev.authorization ? [renderDiffSummary(prev.diff)] : []),
           );
           return;
@@ -538,8 +541,7 @@ export async function renderPublish(container, navTo, refreshGlobal) {
           el('div', { class: 'preview-card form-stack' },
             el('div', { class: 'toolbar-row' },
               badge('Ed25519 签名验证通过', 'ok'),
-              badge(`目标版本 v${auth.version}`, 'accent'),
-              prev.idempotent ? badge('与当前活动快照完全相同（幂等重传）', 'neutral') : null,
+              prev.idempotent ? badge('与已发布授权相同', 'neutral') : null,
             ),
             el('dl', { class: 'kv-grid' },
               el('div', {}, el('dt', {}, '快照摘要'), el('dd', {}, copyableCode(auth.digest, '复制快照摘要', true))),
@@ -564,22 +566,18 @@ export async function renderPublish(container, navTo, refreshGlobal) {
     el('span', { class: 'dropzone-glyph icon', 'aria-hidden': 'true' }),
     el('div', { class: 'dropzone-copy' }, dzTitle, dzSub),
   );
-  bindDropzone(
-    dropzone, fileInput, dzTitle, dzSub,
-    '点击选择或拖拽已签 authorization.json 到此处',
-    '中心将严格校验 Ed25519 签名、组网指纹、防回滚版本号与有效期，原样保留签名封套',
-  );
+  bindDropzone(dropzone, fileInput, dzTitle, dzSub, uploadTitle, uploadHint);
 
-  async function inspectVersion(ver) {
-    const detail = await api(`authorization/history/${ver}`);
-    openModal(`已签快照历史只读查看 · v${detail.version}`, el('div', { class: 'form-stack' },
-      callout('', '历史版本仅供审计核对。为防御重放与权限回滚攻击，协议层严格禁止回退到低版本快照。'),
+  async function inspectPublication(version) {
+    const detail = await api(`authorization/history/${version}`);
+    openModal('签名授权详情', el('div', { class: 'form-stack' },
+      callout('', '发布记录仅供核对，不能恢复旧的授权快照。'),
       el('dl', { class: 'kv-grid' },
         el('div', {}, el('dt', {}, '摘要'), el('dd', {}, copyableCode(detail.digest, '复制历史摘要', true))),
         el('div', {}, el('dt', {}, '发布时间'), el('dd', {}, fmtTime(detail.publishedAt))),
         el('div', {}, el('dt', {}, '到期时间'), el('dd', {}, fmtTime(detail.expiresAt))),
       ),
-      renderRuleTable(detail.rules, `v${detail.version} 编译过滤规则（${detail.rules?.length || 0} 条）`),
+      renderRuleTable(detail.rules, `包过滤规则（${detail.rules?.length || 0} 条）`),
     ));
   }
 
@@ -592,22 +590,27 @@ export async function renderPublish(container, navTo, refreshGlobal) {
     historyMount.replaceChildren(
       el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-labelledby': 'hist-cap' },
         el('table', { class: 'tbl-history' },
-          el('caption', { id: 'hist-cap' }, `已签授权版本历史（共 ${list.length} 个版本 · 只读防降级）`),
+          el('caption', { id: 'hist-cap' }, `签名授权记录（共 ${list.length} 条）`),
           el('thead', {}, el('tr', {},
-            el('th', { scope: 'col' }, '版本'),
+            el('th', { scope: 'col' }, '发布时间'),
             el('th', { scope: 'col' }, '快照摘要'),
             el('th', { scope: 'col' }, '成员 / 规则'),
-            el('th', { scope: 'col' }, '发布时间'),
-            el('th', { scope: 'col' }, '到期状态'),
+            el('th', { scope: 'col' }, '到期时间与状态'),
             el('th', { scope: 'col' }, '操作'),
           )),
           el('tbody', {}, list.map((h) => el('tr', {},
-            el('th', { scope: 'row', class: 'mono' }, `v${h.version} `, h.active ? badge('当前生效', 'ok') : null),
+            el('th', { scope: 'row' }, el('time', { datetime: h.publishedAt }, fmtTime(h.publishedAt))),
             el('td', {}, copyableCode(h.digest, '复制摘要', true)),
             el('td', {}, `${h.members} 成员 / ${h.rules} 规则`),
-            el('td', {}, fmtTime(h.publishedAt)),
-            el('td', {}, fmtTime(h.expiresAt), ' ', h.expired ? badge('已过期', 'err') : badge('有效期内', 'neutral')),
-            el('td', {}, el('button', { type: 'button', class: 'btn secondary sm', onClick: () => inspectVersion(h.version) }, '查看快照')),
+            el('td', {},
+              el('time', { datetime: h.expiresAt }, fmtTime(h.expiresAt)), ' ',
+              h.expired ? badge('已过期', 'err') : h.active ? badge('当前生效', 'ok') : badge('历史记录', 'neutral'),
+            ),
+            el('td', {}, el('button', {
+              type: 'button', class: 'btn secondary sm',
+              'aria-label': `查看快照：${fmtTime(h.publishedAt)}发布`,
+              onClick: () => inspectPublication(h.version),
+            }, '查看快照')),
           ))),
         ),
       ),
@@ -617,8 +620,8 @@ export async function renderPublish(container, navTo, refreshGlobal) {
   container.replaceChildren(
     el('div', { class: 'page-head' },
       el('div', {},
-        el('h1', {}, '签名授权发布与版本历史'),
-        el('p', {}, '上传所有者离线签发的 authorization.json。中心将校验 Ed25519 签名、组网指纹、有效期与防回滚版本号，不在中心重新序列化载荷。'),
+        el('h1', {}, '签名授权发布'),
+        el('p', {}, '上传所有者离线签发的 authorization.json，由中心验签并原样分发。'),
       ),
       el('button', { type: 'button', class: 'btn secondary', onClick: () => navTo('policy') }, '返回策略草稿工作台'),
     ),
@@ -633,7 +636,7 @@ export async function renderPublish(container, navTo, refreshGlobal) {
       el('div', { class: 'form-actions' }, publishBtn),
     ),
     el('section', { class: 'card form-stack' },
-      el('h2', {}, '历史发布记录（只读防降级）'),
+      el('h2', {}, '发布记录'),
       historyMount,
     ),
   );

@@ -1,0 +1,243 @@
+.auth-shell {
+  --login-canvas: var(--bg);
+  --login-surface: var(--surface);
+  --login-field: var(--surface-subtle);
+  --login-line: var(--border);
+  --login-control: var(--border-strong);
+  --login-action: var(--accent);
+  --login-action-fg: var(--accent-fg);
+  --login-mark: var(--accent-soft);
+  --login-trace: var(--border);
+  --login-node: var(--border-strong);
+  min-block-size: 100vh;
+  min-block-size: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: clamp(1.5rem, 5vh, 4rem) 1rem;
+  position: relative;
+  isolation: isolate;
+  background: var(--login-canvas);
+}
+
+@supports (color: light-dark(white, black)) {
+  .auth-shell {
+    --login-canvas: light-dark(#f4f5f9, #111318);
+    --login-surface: light-dark(#ffffff, #191c23);
+    --login-field: light-dark(#f5f6fa, #15171d);
+    --login-line: light-dark(#dce0e9, #333945);
+    --login-control: light-dark(#81899a, #697387);
+    --login-action: light-dark(#3d50ce, #bdc8ff);
+    --login-action-fg: light-dark(#ffffff, #1c254b);
+    --login-mark: light-dark(#e9edff, #272e4b);
+    --login-trace: light-dark(#d7dcea, #333c50);
+    --login-node: light-dark(#a0acd8, #646f9a);
+  }
+}
+
+.auth-mesh {
+  display: none;
+  position: absolute;
+  z-index: -1;
+  inset-inline-start: 50%;
+  inset-block-start: 50%;
+  transform: translate(-50%, -50%);
+  inline-size: min(100%, 68rem);
+  block-size: auto;
+  max-block-size: 100%;
+  mask-image: linear-gradient(90deg, transparent, black 14% 86%, transparent);
+  pointer-events: none;
+}
+
+@media (min-width: 50rem) {
+  .auth-mesh {
+    display: block;
+  }
+}
+
+.auth-mesh-traces {
+  stroke: var(--login-trace);
+}
+
+.auth-mesh-nodes {
+  fill: var(--login-canvas);
+  stroke: var(--login-node);
+  stroke-width: 1.5;
+}
+
+.auth-layout {
+  inline-size: min(100%, 27rem);
+  min-inline-size: 0;
+}
+
+.auth-wordmark {
+  justify-content: center;
+  gap: 0.625rem;
+  margin-block-end: 1.45rem;
+}
+
+.auth-wordmark .brand-mark {
+  background: var(--login-mark);
+  color: var(--login-action);
+  border: 1px solid var(--login-line);
+  box-shadow: none;
+}
+
+.auth-wordmark .brand-name {
+  font-size: 1.4rem;
+  letter-spacing: -0.035em;
+}
+
+.auth-card {
+  display: grid;
+  gap: 1.5rem;
+  padding: clamp(1.25rem, 4vw, 2.25rem);
+  border: 1px solid var(--login-line);
+  border-radius: 1.125rem;
+  background: var(--login-surface);
+  box-shadow: 0 16px 56px rgb(0 0 0 / 0.09);
+}
+
+.auth-heading h1 {
+  margin: 0;
+  font-size: clamp(1.6rem, 1.375rem + 1vi, 2rem);
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.auth-heading p {
+  margin: 0.55rem 0 0;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+/* Differentiate a preview from a login error without a second alert box. */
+.auth-card > .callout.warn {
+  margin: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  padding: 0;
+  font-size: 0.8125rem;
+  text-wrap: balance;
+}
+
+.auth-card > .callout.warn::before {
+  content: none;
+}
+
+.auth-card > .callout.warn strong {
+  color: var(--text);
+}
+
+.auth-card > .callout.warn code {
+  white-space: nowrap;
+}
+
+.auth-card .field {
+  gap: 0.45rem;
+}
+
+.auth-password {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0 0.25rem 0 0;
+  border: 1px solid var(--login-control);
+  border-radius: 0.625rem;
+  background: var(--login-field);
+}
+
+.auth-password:focus-within {
+  outline: 2px solid var(--login-action);
+  outline-offset: 2px;
+}
+
+.auth-password input {
+  min-inline-size: 0;
+  min-block-size: 3rem;
+  border: 0;
+  background: transparent;
+  font-size: 1rem;
+  outline: none;
+}
+
+.auth-reveal.btn {
+  min-inline-size: 2.75rem;
+  min-block-size: 2.75rem;
+  padding-inline: 0.5rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.auth-submit.btn.primary {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.45rem;
+  min-block-size: 3rem;
+  border: 1px solid var(--login-action);
+  border-radius: 0.625rem;
+  background: var(--login-action);
+  color: var(--login-action-fg);
+  font-size: 0.9375rem;
+}
+
+.auth-submit.btn.primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--login-action) 92%, var(--login-action-fg));
+}
+
+.auth-submit svg {
+  inline-size: 1.1rem;
+  block-size: 1.1rem;
+}
+
+.auth-reveal:focus-visible,
+.auth-submit:focus-visible,
+.auth-help summary:focus-visible {
+  outline: 2px solid var(--login-action);
+  outline-offset: 2px;
+}
+
+.auth-error {
+  margin: 0;
+  color: var(--err-fg);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.auth-help {
+  padding-block-start: 1rem;
+  border-block-start: 1px solid var(--login-line);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.auth-help summary {
+  inline-size: fit-content;
+  max-inline-size: 100%;
+  padding-block: 0.125rem;
+  cursor: pointer;
+}
+
+.auth-help summary:hover {
+  color: var(--text);
+}
+
+.auth-help p {
+  margin: 0.55rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.auth-status {
+  margin: 1.05rem 0 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+@media (forced-colors: active) {
+  .auth-mesh {
+    display: none;
+  }
+}

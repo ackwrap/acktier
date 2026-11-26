@@ -137,6 +137,10 @@ try {
     await js(`location.hash = ${JSON.stringify(hash)}`);
     await waitFor(heading, () => js(`document.querySelector('#main-content h1')?.textContent.includes(${JSON.stringify(heading)})`));
   };
+  const noVersionLabel = async (selector) => {
+    const text = await js(`document.querySelector(${JSON.stringify(selector)}).innerText`);
+    assert.doesNotMatch(text, /\bv\d+\b/, `unexpected version label in ${selector}`);
+  };
 
   // Reject a private file without POSTing it, even if an earlier valid preview
   // response comes back after the newer selection.
@@ -183,6 +187,7 @@ try {
     ready: `!document.querySelector('#setup-confirm-check').disabled`,
     disabled: `document.querySelector('#setup-submit-btn').disabled && document.querySelector('#setup-confirm-check').disabled`,
   });
+  await noVersionLabel('#trust-preview-box');
   await js(`document.querySelector('#setup-confirm-check').click(); document.querySelector('#setup-form').requestSubmit()`);
   await waitFor('dashboard', () => js(`document.querySelector('#app-shell')?.hidden === false`));
 
@@ -219,6 +224,22 @@ try {
   const posted = uploads.filter(({ path }) => path.startsWith('/admin/api/authorization'));
   assert.equal(posted.length, 3, 'expected two valid previews and one signed publication');
   for (const req of posted) assert.deepEqual(JSON.parse(req.body), envelope, 'browser changed the signed envelope');
+
+  const history = await web('authorization/history');
+  assert.ok(history[0].version > 0, 'API must retain the signed snapshot version');
+  await waitFor('publication record', () => js(`!!document.querySelector('.tbl-history tbody th time')`));
+  await noVersionLabel('#main-content');
+  await js(`document.querySelector('.tbl-history tbody tr td:last-child button').click()`);
+  await waitFor('publication details', () => js(`document.querySelector('#modal-dialog').open`));
+  await noVersionLabel('#modal-dialog');
+  await js(`document.querySelector('#modal-dialog').close()`);
+
+  await view('overview', '概览与实时协调状态');
+  await noVersionLabel('.topbar');
+  await noVersionLabel('#main-content');
+  await view(`policy/${draft.draft.id}`, 'ACL 与策略');
+  await waitFor('stale draft warning', () => js(`document.querySelector('.draft-layout section')?.innerText.includes('生效策略已有更新')`));
+  await noVersionLabel('#main-content');
 
   const cloned = await web('drafts', { method: 'POST', body: { name: 'Clone of active', fromActive: true } });
   assert.deepEqual(cloned.draft.policy.acl, acl);

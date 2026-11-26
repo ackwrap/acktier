@@ -2,6 +2,7 @@ import {
   api, el, badge, callout, searchBox, makeDropzone, copyableCode, fmtTime, toast, openModal, closeModal, setSessionCSRF,
 } from './api.js';
 import { readPublicArtifact } from './artifacts.js';
+import { renderAuditRow } from './views_audit.js';
 
 const keyStateMeta = {
   active: ['可用', 'ok'],
@@ -172,9 +173,7 @@ export async function renderSecurity(container, refreshGlobal) {
           : null,
       ),
       el('p', { class: 'muted' },
-        '管理接口 ',
-        el('code', {}, '/api/v1/admin/*'),
-        ' 仅挂载在独立管理端口，要求每次请求携带 Ed25519 挑战签名。可在控制端运行 ',
+        '管理接口仅在独立管理端口开放，每次请求都需要 Ed25519 挑战签名。可在控制端运行 ',
         el('code', {}, 'acktier owner controller-init --dir ./data/owner'),
         ' 导出公开的 ',
         el('code', {}, 'controller-trust.json'),
@@ -245,15 +244,9 @@ export async function renderSecurity(container, refreshGlobal) {
               el('th', { scope: 'col' }, '操作者'),
               el('th', { scope: 'col' }, '动作'),
               el('th', { scope: 'col' }, '目标'),
-              el('th', { scope: 'col' }, '结果与版本/摘要'),
+              el('th', { scope: 'col' }, '结果与说明'),
             )),
-            el('tbody', {}, items.map((a) => el('tr', {},
-              el('th', { scope: 'row', class: 'mono' }, fmtTime(a.at)),
-              el('td', {}, a.actor || '—'),
-              el('td', {}, el('code', { class: 'chip' }, a.action)),
-              el('td', {}, a.target ? el('code', { class: 'breakable' }, a.target) : '—'),
-              el('td', {}, badge(a.result === 'success' ? '成功' : '失败', a.result === 'success' ? 'ok' : 'err'), a.detail ? ` ${a.detail}` : ''),
-            ))),
+            el('tbody', {}, items.map(renderAuditRow)),
           ),
         )
         : el('div', { class: 'empty-state' }, '无匹配的安全审计记录。'),
@@ -269,7 +262,7 @@ export async function renderSecurity(container, refreshGlobal) {
   }
 
   const auditSearch = el('input', {
-    type: 'search', placeholder: '筛选动作、操作者或目标版本…', 'aria-label': '筛选审计日志',
+    type: 'search', placeholder: '筛选动作、操作者或摘要…', 'aria-label': '筛选审计日志',
     onInput: () => { auditState.q = auditSearch.value.trim(); auditState.page = 1; loadAudit(); },
   });
 

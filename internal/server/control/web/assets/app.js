@@ -20,6 +20,31 @@ function showShell(which) {
   appShell.hidden = which !== 'app';
 }
 
+function wireCompactNavigation() {
+  const nav = document.getElementById('console-nav');
+  const toggle = document.getElementById('console-nav-toggle');
+  const sidebar = toggle.closest('.sidebar');
+  const setExpanded = (expanded) => {
+    toggle.setAttribute('aria-expanded', String(expanded));
+    nav.classList.toggle('is-collapsed', !expanded);
+  };
+  setExpanded(false);
+  toggle.hidden = false;
+  toggle.addEventListener('click', () => setExpanded(toggle.getAttribute('aria-expanded') === 'false'));
+  sidebar.addEventListener('click', (event) => {
+    if (!event.target.closest('a') || !toggle.offsetWidth || event.button !== 0 ||
+      event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    setExpanded(false);
+    mainContent.focus({ preventScroll: true });
+  });
+  sidebar.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !toggle.offsetWidth || toggle.getAttribute('aria-expanded') !== 'true') return;
+    event.preventDefault();
+    setExpanded(false);
+    toggle.focus();
+  });
+}
+
 function updateTopChrome(overviewData) {
   if (!overviewData) return;
   const netEl = document.getElementById('top-network-id');
@@ -28,20 +53,6 @@ function updateTopChrome(overviewData) {
     netEl.dataset.fullText = full;
     netEl.className = 'mono truncate-mid';
     netEl.replaceChildren(el('span', { class: 'truncate-head' }, full.slice(0, -6)), full.slice(-6));
-  }
-  const pill = document.getElementById('top-auth-pill');
-  if (pill) {
-    const auth = overviewData.authorization;
-    if (!auth) {
-      pill.className = 'badge warn icon-start';
-      pill.textContent = '待发布首版签名';
-    } else if (auth.expired) {
-      pill.className = 'badge err icon-start';
-      pill.textContent = `v${auth.version} 已过期`;
-    } else {
-      pill.className = 'badge ok icon-start';
-      pill.textContent = `签名 v${auth.version} 生效中`;
-    }
   }
   const reqBadge = document.getElementById('nav-badge-requests');
   const reqCount = overviewData.counts?.requests || 0;
@@ -207,7 +218,6 @@ function wireSetupWizard() {
       stagedTrust = trust;
       document.getElementById('preview-netid').textContent = preview.networkId;
       document.getElementById('preview-pubkey').textContent = preview.publicKey;
-      document.getElementById('preview-minver').textContent = `v${preview.minimumVersion}`;
       previewBox.hidden = false;
       confirmCheck.disabled = false;
       syncBtn();
@@ -253,11 +263,11 @@ function applySession(s) {
   const badgeEl = document.getElementById('auth-state-badge');
   if (badgeEl) {
     if (!currentSession.passwordConfigured) {
-      badgeEl.textContent = '待配置中心管理员密码';
+      badgeEl.textContent = '等待配置管理员密码';
     } else if (currentSession.setupPending) {
-      badgeEl.textContent = '状态：等待首次绑定所有者公钥';
+      badgeEl.textContent = '登录后绑定所有者';
     } else {
-      badgeEl.textContent = '状态：所有者已绑定 · 零信任协调运行中';
+      badgeEl.textContent = '所有者已绑定';
     }
   }
 }
@@ -276,6 +286,7 @@ async function boot() {
   initPlatformEnhancements();
   wireLoginView();
   wireSetupWizard();
+  wireCompactNavigation();
 
   document.getElementById('theme-toggle-btn')?.addEventListener('click', toggleColorScheme);
   document.getElementById('setup-theme-btn')?.addEventListener('click', toggleColorScheme);

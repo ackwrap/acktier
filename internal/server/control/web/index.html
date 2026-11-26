@@ -8,72 +8,47 @@
   <link rel="stylesheet" href="/admin/assets/icons.css">
   <link rel="stylesheet" href="/admin/assets/base.css">
   <link rel="stylesheet" href="/admin/assets/components.css">
+  <link rel="stylesheet" href="/admin/assets/login.css">
+  <link rel="stylesheet" href="/admin/assets/sidebar.css">
   <script type="module" src="/admin/assets/app.js"></script>
 </head>
 <body>
-  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <main id="auth-shell" class="auth-shell" hidden>
+    <svg class="auth-mesh" viewBox="0 0 1000 560" fill="none" aria-hidden="true" focusable="false">
+      <g class="auth-mesh-traces">
+        <path d="M32 174h108l64 64h145m302 84h145l64 64h108M32 374h130l82-82h90m332-24h90l82-82h130"/>
+        <path d="M12 282h80l45 45h67l82 82h82m264-268h82l82 82h67l45 45h80" stroke-dasharray="3 7"/>
+        <path d="M140 174v-56h88l80 80m552 188v56h-88l-80-80"/>
+      </g>
+      <g class="auth-mesh-nodes">
+        <circle cx="140" cy="174" r="5"/><circle cx="860" cy="386" r="5"/>
+        <circle cx="204" cy="238" r="4"/><circle cx="796" cy="322" r="4"/>
+        <circle cx="162" cy="374" r="4"/><circle cx="838" cy="186" r="4"/>
+        <circle cx="92" cy="282" r="3"/><circle cx="908" cy="268" r="3"/>
+      </g>
+    </svg>
+    <div class="auth-layout">
+      <div class="auth-brand auth-wordmark">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m12 2.5 8.2 4.75v9.5L12 21.5l-8.2-4.75v-9.5L12 2.5Z"/>
+            <path d="M12 6v3.8m5.2 5.2-3.3-1.9m-7.1 1.9 3.3-1.9"/>
+            <circle cx="12" cy="12" r="2.2"/>
+          </svg>
+        </span>
+        <span class="brand-name">AckTier</span>
+      </div>
 
-  <!-- Unauthenticated Split Enterprise Login Shell -->
-  <div id="auth-shell" class="auth-shell" hidden>
-    <div class="auth-frame">
-      <section class="auth-showcase" aria-label="零信任架构说明">
-        <div>
-          <div class="auth-brand">
-            <span class="brand-mark" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
-                <polygon points="12 2 21 7 21 17 12 22 3 17 3 7"/>
-                <circle cx="12" cy="12" r="2.6"/>
-                <path d="M12 4.6v4.8M18.4 15.7l-4.2-2.4M5.6 15.7l4.2-2.4"/>
-              </svg>
-            </span>
-            <div>
-              <div class="brand-name">AckTier Mesh Control</div>
-              <div id="auth-state-badge" class="brand-sub">零信任协调与签名分发中心</div>
-            </div>
-          </div>
-
-          <h2 class="showcase-headline">控制面无权越俎代庖，数据面只认离线根签名</h2>
-          <p class="showcase-lead">
-            中心服务器仅负责连接提示交换、策略草稿编排与已签快照验签分发，绝不生成或持有组网所有者签名私钥。
-          </p>
-        </div>
-
-        <ul class="pillar-list">
-          <li class="pillar-item">
-            <strong>所有者离线 Ed25519 签发</strong>
-            <span>成员身份、虚拟 IP、批准路由与 ACL 均由所有者客户端本地签名并附带防回滚版本号。</span>
-          </li>
-          <li class="pillar-item">
-            <strong>多协议直连与智能跳板选路</strong>
-            <span>支持 UDP / TCP / QUIC / WSS 多栈并发探测、对等跳板中继与密文兜底转发。</span>
-          </li>
-          <li class="pillar-item">
-            <strong>独立管理监听与 Argon2id 会话</strong>
-            <span>Web 管理台仅挂载于独立管理端口，与普通节点监听端口物理隔离。</span>
-          </li>
-        </ul>
-
-        <div class="showcase-foot">
-          <span>Zero-Trust Overlay SD-WAN</span>
-          <span>Strict CSP · Same-Origin Protected</span>
-        </div>
-      </section>
-
-      <div class="auth-card">
-        <div>
-          <span class="badge accent">独立管理平面</span>
+      <section class="auth-card" aria-labelledby="login-title">
+        <header class="auth-heading">
           <h1 id="login-title">管理员登录</h1>
-        </div>
-        <p id="login-subtitle" class="muted">
-          请输入中心独立的 Web 管理员密码。登录仅解锁管理台视图与草稿编排，无法绕过所有者签名直接授权节点。
-        </p>
+          <p>仅限中心管理员访问。</p>
+        </header>
 
-        <div id="login-alert" class="callout error icon-start" role="alert" hidden></div>
-
-        <form id="login-form" class="form-stack" method="post">
+        <form id="login-form" class="form-stack" method="post" aria-labelledby="login-title">
           <div class="field">
             <label for="current-password">管理员密码</label>
-            <div class="input-group">
+            <div class="auth-password">
               <input
                 type="password"
                 id="current-password"
@@ -81,18 +56,31 @@
                 autocomplete="current-password"
                 enterkeyhint="done"
                 maxlength="256"
-                placeholder="输入中心 Web 管理员密码"
+                aria-describedby="login-alert"
                 required
               >
-              <button type="button" id="toggle-pw-btn" class="btn ghost sm btn-eye icon-start" aria-label="显示密码" aria-pressed="false">显示</button>
+              <button type="button" id="toggle-pw-btn" class="btn ghost auth-reveal" aria-label="显示密码" aria-controls="current-password" aria-pressed="false">显示</button>
             </div>
-            <p class="field-hint">首次初始密码保存在中心主机私有文件 <code>server-credentials.json</code>。如需重置，请停止中心后执行 <code>acktier-server reset-password</code>。</p>
+            <p id="login-alert" class="auth-error" role="alert" hidden></p>
           </div>
-          <button type="submit" id="login-submit" class="btn primary full">登录中心管理台</button>
+          <button type="submit" id="login-submit" class="btn primary auth-submit">
+            登录
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M4 10h12m-5-5 5 5-5 5"/>
+            </svg>
+          </button>
         </form>
-      </div>
+
+        <details class="auth-help">
+          <summary>找不到管理员密码？</summary>
+          <p>首次登录：在中心主机的 <code>server-credentials.json</code> 中查看 <code>adminPassword</code>。</p>
+          <p>忘记密码：停止中心，执行 <code>acktier-server reset-password</code>，然后重新启动。</p>
+        </details>
+      </section>
+
+      <p class="auth-status"><span id="auth-state-badge">中心管理台</span></p>
     </div>
-  </div>
+  </main>
 
   <!-- First-Run Owner Binding Wizard Shell -->
   <div id="setup-shell" class="setup-shell" hidden>
@@ -173,10 +161,6 @@
                 <dt>所有者 Ed25519 公钥</dt>
                 <dd><code id="preview-pubkey" class="mono breakable"></code></dd>
               </div>
-              <div>
-                <dt>最低可接受授权版本</dt>
-                <dd><code id="preview-minver" class="mono"></code></dd>
-              </div>
             </dl>
           </div>
 
@@ -195,56 +179,115 @@
 
   <!-- Main Authenticated Console Shell -->
   <div id="app-shell" class="app-shell" hidden>
-    <aside class="sidebar" aria-label="主导航">
-      <div class="sidebar-brand">
-        <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
-            <polygon points="12 2 21 7 21 17 12 22 3 17 3 7"/>
-            <circle cx="12" cy="12" r="2.6"/>
-            <path d="M12 4.6v4.8M18.4 15.7l-4.2-2.4M5.6 15.7l4.2-2.4"/>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <a class="sidebar-brand" href="#overview" aria-label="AckTier，返回概览">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m12 2.5 8.2 4.75v9.5L12 21.5l-8.2-4.75v-9.5L12 2.5Z"/>
+              <path d="M12 6v3.8m5.2 5.2-3.3-1.9m-7.1 1.9 3.3-1.9"/>
+              <circle cx="12" cy="12" r="2.2"/>
+            </svg>
+          </span>
+          <span>
+            <span class="brand-name">AckTier</span>
+            <span class="brand-sub">中心管理台</span>
+          </span>
+        </a>
+        <button type="button" class="nav-toggle" id="console-nav-toggle" aria-controls="console-nav" aria-expanded="false" hidden>
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M5 8h14M5 16h14"/>
           </svg>
-        </span>
-        <div>
-          <div class="brand-name">AckTier</div>
-          <div class="brand-sub">中心协调管理台</div>
-        </div>
+          导航
+        </button>
       </div>
 
-      <nav class="nav-list" aria-label="功能页面">
-        <div class="nav-group-label">网络态势与设备</div>
-        <a href="#overview" data-route="overview" class="nav-item" aria-current="page">
-          <span class="nav-label icon-start">概览与拓扑</span>
-        </a>
-        <a href="#requests" data-route="requests" class="nav-item">
-          <span class="nav-label icon-start">入网申请</span>
-          <span id="nav-badge-requests" class="nav-pill" hidden>0</span>
-        </a>
-        <a href="#nodes" data-route="nodes" class="nav-item">
-          <span class="nav-label icon-start">节点与能力对照</span>
-        </a>
-
-        <div class="nav-group-label">策略编排与发布</div>
-        <a href="#policy" data-route="policy" class="nav-item">
-          <span class="nav-label icon-start">ACL 与策略草稿</span>
-          <span id="nav-badge-drafts" class="nav-pill subtle" hidden>0</span>
-        </a>
-        <a href="#publish" data-route="publish" class="nav-item">
-          <span class="nav-label icon-start">签名发布与历史</span>
-        </a>
-
-        <div class="nav-group-label">安全与治理</div>
-        <a href="#security" data-route="security" class="nav-item">
-          <span class="nav-label icon-start">申请码与安全</span>
-        </a>
+      <nav id="console-nav" class="nav-list" aria-label="主导航">
+        <div class="nav-group">
+          <h2 class="nav-group-label" id="nav-network">组网</h2>
+          <ul class="nav-links" aria-labelledby="nav-network" role="list">
+            <li>
+              <a href="#overview" data-route="overview" class="nav-item" aria-current="page">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <circle cx="12" cy="5.5" r="2.5"/>
+                  <circle cx="5.5" cy="17.5" r="2.5"/>
+                  <circle cx="18.5" cy="17.5" r="2.5"/>
+                  <path d="m10.8 7.7-4 7.6m6.4-7.6 4 7.6M8 17.5h8"/>
+                </svg>
+                <span class="nav-label">概览与拓扑</span>
+              </a>
+            </li>
+            <li>
+              <a href="#requests" data-route="requests" class="nav-item">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <circle cx="9" cy="7" r="3"/>
+                  <path d="M3.5 20v-2a4 4 0 0 1 4-4h3a4 4 0 0 1 4 4v2m2-10h5M19 7.5v5"/>
+                </svg>
+                <span class="nav-label">入网申请</span>
+                <span id="nav-badge-requests" class="nav-count" hidden>0</span>
+              </a>
+            </li>
+            <li>
+              <a href="#nodes" data-route="nodes" class="nav-item">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <rect x="3" y="4.5" width="18" height="6" rx="1.5"/>
+                  <rect x="3" y="13.5" width="18" height="6" rx="1.5"/>
+                  <path d="M7 7.5h.01M7 16.5h.01M13 7.5h4m-4 9h4"/>
+                </svg>
+                <span class="nav-label">节点与能力</span>
+              </a>
+            </li>
+          </ul>
+        </div>
+        <div class="nav-group">
+          <h2 class="nav-group-label" id="nav-policy">策略</h2>
+          <ul class="nav-links" aria-labelledby="nav-policy" role="list">
+            <li>
+              <a href="#policy" data-route="policy" class="nav-item">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M12 21c4.3-1.9 7-4.9 7-9V6l-7-3-7 3v6c0 4.1 2.7 7.1 7 9Z"/>
+                  <path d="M9 10.5h6m-6 3h6"/>
+                </svg>
+                <span class="nav-label">ACL 草稿</span>
+                <span id="nav-badge-drafts" class="nav-count" hidden>0</span>
+              </a>
+            </li>
+            <li>
+              <a href="#publish" data-route="publish" class="nav-item">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5L13.5 3Z"/>
+                  <path d="M13 3v6h6m-10 6 2 2 4-4"/>
+                </svg>
+                <span class="nav-label">签名发布</span>
+              </a>
+            </li>
+          </ul>
+        </div>
+        <div class="nav-group">
+          <h2 class="nav-group-label" id="nav-admin">管理</h2>
+          <ul class="nav-links" aria-labelledby="nav-admin" role="list">
+            <li>
+              <a href="#security" data-route="security" class="nav-item">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <circle cx="8" cy="16" r="4"/>
+                  <path d="m10.8 13.2 8.7-8.7m-5 5 2.5 2.5m.5-5.5L20 9"/>
+                </svg>
+                <span class="nav-label">凭据与审计</span>
+              </a>
+            </li>
+          </ul>
+        </div>
       </nav>
 
       <div class="sidebar-footer">
-        <div class="trust-note">
-          <strong><span class="trust-glyph icon" aria-hidden="true"></span>零信任权限边界</strong>
-          <span>中心仅作协调与验签分发，不持有所有者签名私钥。</span>
-        </div>
+        <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <rect x="5" y="10" width="14" height="10" rx="2"/>
+          <path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v2"/>
+        </svg>
+        <span>签名私钥留在所有者端</span>
       </div>
-    </aside>
+    </div>
 
     <div class="workspace">
       <header class="topbar">
@@ -258,7 +301,6 @@
               <span class="tip" role="status"></span>
             </span>
           </span>
-          <span id="top-auth-pill" class="badge neutral">尚未发布授权</span>
         </div>
 
         <div class="topbar-actions">

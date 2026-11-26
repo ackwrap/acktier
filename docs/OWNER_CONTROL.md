@@ -86,7 +86,7 @@ acktier up --server http://127.0.0.1:8080 --auth-key "<PRE_AUTH_KEY>" --hostname
 acktier owner sign --dir ./data/owner --policy ./policy.json --valid-for 168h
 ```
 
-再到管理台「签名发布与历史」上传 `authorization.json`（支持发布前验签预览与变更对比）。无需访问签名私钥；如果已启用控制端 API 委托，也可运行：
+再到管理台「签名发布」上传 `authorization.json`（支持发布前验签预览与变更对比）。无需访问签名私钥；如果已启用控制端 API 委托，也可运行：
 
 ```bash
 acktier owner publish --server http://127.0.0.1:8081 --dir ./data/owner --file ./data/owner/authorization.json

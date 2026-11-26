@@ -1,6 +1,7 @@
 import {
   api, el, badge, callout, searchBox, copyableCode, fmtTime, fmtRelative, fmtBytes, fmtPortsMap, toast, openModal, closeModal,
 } from './api.js';
+import { renderAuditRow } from './views_audit.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 function svgEl(tag, attrs = {}) {
@@ -11,7 +12,7 @@ function svgEl(tag, attrs = {}) {
   return n;
 }
 
-function buildTopologyCanvas(topo, revision) {
+function buildTopologyCanvas(topo) {
   const nodes = topo?.nodes || [];
   const links = topo?.links || [];
   if (!nodes.length) {
@@ -114,7 +115,6 @@ function buildTopologyCanvas(topo, revision) {
         el('span', { class: 'legend-item' }, el('span', { class: 'status-dot warn' }), '支持对等跳板 (CanRelay)'),
         el('span', { class: 'legend-item' }, el('span', { class: 'status-dot' }), '离线成员'),
       ),
-      el('span', { class: 'mono' }, `NetMap 修订号 #${revision ?? 0}`),
     ),
     svg,
   );
@@ -145,7 +145,7 @@ export async function renderOverview(container, navTo, updateChrome) {
       el('strong', {}, '尚未发布任何已签授权快照。'),
       ' 当前所有者公钥已锁定，但数据面尚无生效成员表。请先在「入网申请」核对设备公钥并加入草稿，导出后在所有者电脑本地执行 ',
       el('code', {}, 'acktier owner sign'),
-      '，再到「签名发布与历史」上传 ',
+      '，再到「签名发布」上传 ',
       el('code', {}, 'authorization.json'),
       '。',
     );
@@ -156,28 +156,18 @@ export async function renderOverview(container, navTo, updateChrome) {
     const barState = auth.expired ? 'err' : hoursLeft < 24 ? 'warn' : 'ok';
     authSection = el('div', { class: 'form-stack' },
       el('div', { class: 'toolbar-row between' },
-        el('div', { class: 'toolbar-row' },
-          badge(`活动版本 v${auth.version}`, 'accent'),
-          auth.expired ? badge('授权已过期（节点数据面停用）', 'err') : badge(`有效期内 · 约剩 ${hoursLeft} 小时`, hoursLeft < 24 ? 'warn' : 'ok'),
-        ),
+        auth.expired ? badge('授权已过期（节点数据面停用）', 'err') : badge(`有效期内 · 约剩 ${hoursLeft} 小时`, hoursLeft < 24 ? 'warn' : 'ok'),
         el('span', { class: 'muted' }, `到期时间：${fmtTime(auth.expiresAt)}`),
       ),
       el('progress', { class: `expiry-bar ${barState}`, value: pct, max: 100, 'aria-label': '授权剩余有效期比例' }),
       el('dl', { class: 'kv-grid' },
         el('div', {}, el('dt', {}, '快照 SHA-256 摘要'), el('dd', {}, copyableCode(auth.digest, '复制快照摘要', true))),
-        el('div', {}, el('dt', {}, '防回滚最低水位'), el('dd', {}, `v${data.minimumVersion}`)),
         el('div', {}, el('dt', {}, '已签成员 / 编译规则'), el('dd', {}, `${auth.members} 台成员 · ${auth.rules} 条过滤规则`)),
       ),
     );
   }
 
-  const auditRows = (data.recentAudit || []).map((a) => el('tr', {},
-    el('th', { scope: 'row', class: 'mono' }, fmtTime(a.at)),
-    el('td', {}, a.actor || '—'),
-    el('td', {}, el('code', { class: 'chip' }, a.action)),
-    el('td', {}, a.target ? el('code', { class: 'breakable' }, a.target) : '—'),
-    el('td', {}, badge(a.result === 'success' ? '成功' : '失败', a.result === 'success' ? 'ok' : 'err'), a.detail ? ` ${a.detail}` : ''),
-  ));
+  const auditRows = (data.recentAudit || []).map(renderAuditRow);
 
   container.replaceChildren(
     el('div', { class: 'page-head' },
@@ -192,8 +182,8 @@ export async function renderOverview(container, navTo, updateChrome) {
     ),
 
     el('div', { class: 'kpi-grid' },
-      kpiCard('根信任状态', '已锁定', `最低版本要求 v${data.minimumVersion}`, 'kpi-icon-trust'),
-      kpiCard('已签授权成员', String(counts.members || 0), auth ? `来自已签快照 v${auth.version}` : '尚未发布签名快照', 'kpi-icon-members'),
+      kpiCard('根信任状态', '已锁定', '所有者公钥已绑定', 'kpi-icon-trust'),
+      kpiCard('已签授权成员', String(counts.members || 0), auth ? '来自签名授权' : '尚未发布授权', 'kpi-icon-members'),
       kpiCard('协调流在线', `${counts.membersOnline || 0} / ${counts.members || 0}`, '仅代表中心控制流心跳', 'kpi-icon-online'),
       kpiCard('待审入网申请', String(counts.requests || 0), '核对公钥后可加入草稿', 'kpi-icon-requests'),
       kpiCard('待签策略草稿', String(counts.drafts || 0), `可用申请码 ${counts.keysActive || 0} 个`, 'kpi-icon-drafts'),
@@ -201,7 +191,7 @@ export async function renderOverview(container, navTo, updateChrome) {
     ),
 
     el('section', { class: 'card form-stack' },
-      el('h2', {}, '活动签名授权租约'),
+      el('h2', {}, '授权状态'),
       authSection,
     ),
 
@@ -210,7 +200,7 @@ export async function renderOverview(container, navTo, updateChrome) {
         el('h2', {}, '组网成员与实测链路拓扑'),
         el('button', { type: 'button', class: 'btn ghost sm', onClick: () => navTo('nodes') }, '查看全部设备台账'),
       ),
-      buildTopologyCanvas(data.topology, data.revision),
+      buildTopologyCanvas(data.topology),
     ),
 
     el('section', { class: 'card form-stack' },
@@ -240,7 +230,7 @@ export async function openAddMemberModal(reqRow, navTo) {
   const drafts = await api('drafts');
   const draftSelect = el('select', { id: 'add-draft-id' },
     el('option', { value: '__new__' }, '＋ 新建一份基于当前生效快照的草稿'),
-    ...drafts.map((d) => el('option', { value: d.id }, `${d.name} (基于 v${d.baseVersion} · ${d.members} 成员)`)),
+    ...drafts.map((d) => el('option', { value: d.id }, `${d.name}（${d.members} 成员）`)),
   );
   if (drafts.length > 0) draftSelect.value = drafts[0].id;
 
