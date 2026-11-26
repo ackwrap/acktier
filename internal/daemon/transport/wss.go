@@ -11,8 +11,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/acktier/acktier/internal/securehttp"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/securehttp"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 const wsPath = "/acktier-ws"

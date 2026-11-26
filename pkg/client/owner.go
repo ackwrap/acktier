@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // OwnerJoinRequests lists unverified applications. Verify node keys through

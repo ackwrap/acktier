@@ -3,8 +3,8 @@ package mesh_test
 import (
 	"testing"
 
-	"github.com/acktier/acktier/internal/daemon/mesh"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/mesh"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 func TestDijkstraMultiHopAndCanRelayEnforcement(t *testing.T) {

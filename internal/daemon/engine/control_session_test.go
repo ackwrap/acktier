@@ -7,10 +7,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/state"
-	"github.com/acktier/acktier/internal/daemon/transport"
-	"github.com/acktier/acktier/internal/daemon/tun"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/state"
+	"github.com/ackwrap/acktier/internal/daemon/transport"
+	"github.com/ackwrap/acktier/internal/daemon/tun"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 type recordingUDP struct {

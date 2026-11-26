@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/acktier/acktier/pkg/client"
+	"github.com/ackwrap/acktier/pkg/client"
 )
 
 func main() {

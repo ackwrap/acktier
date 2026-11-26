@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/nat"
-	"github.com/acktier/acktier/internal/daemon/transport"
-	"github.com/acktier/acktier/pkg/protocol"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/nat"
+	"github.com/ackwrap/acktier/internal/daemon/transport"
+	"github.com/ackwrap/acktier/pkg/protocol"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 type stunProbeEntry struct {

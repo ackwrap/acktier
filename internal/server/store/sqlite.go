@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/acktier/acktier/internal/secfile"
+	"github.com/ackwrap/acktier/internal/secfile"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )

@@ -9,8 +9,8 @@ import (
 
 	"github.com/quic-go/quic-go"
 
-	"github.com/acktier/acktier/pkg/protocol"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/protocol"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 const quicDatagramMaxPayload = 1100

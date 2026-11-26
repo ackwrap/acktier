@@ -11,7 +11,7 @@ import (
 	"github.com/huin/goupnp/dcps/internetgateway2"
 	natpmp "github.com/jackpal/go-nat-pmp"
 
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 const mappingLeaseSec = 3600

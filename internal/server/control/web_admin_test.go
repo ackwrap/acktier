@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acktier/acktier/internal/owner"
-	"github.com/acktier/acktier/internal/server/control"
-	"github.com/acktier/acktier/internal/server/store"
-	"github.com/acktier/acktier/pkg/client"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/owner"
+	"github.com/ackwrap/acktier/internal/server/control"
+	"github.com/ackwrap/acktier/internal/server/store"
+	"github.com/ackwrap/acktier/pkg/client"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 const testWebAdminPassword = "correct-horse-admin-pw"

@@ -4,7 +4,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // stateChange names the rows changed by a store mutation. Keep registration's

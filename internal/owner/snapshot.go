@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // Member is an owner-approved identity, not a copy of untrusted PeerNode metadata.

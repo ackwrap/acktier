@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/acktier/acktier/pkg/protocol"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/protocol"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 const (

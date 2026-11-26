@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/acktier/acktier/internal/owner"
+	"github.com/ackwrap/acktier/internal/owner"
 )
 
 func validCredentialHash(value string) bool {

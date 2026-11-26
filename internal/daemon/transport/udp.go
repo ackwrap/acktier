@@ -4,7 +4,7 @@ import (
 	"context"
 	"net"
 
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // PacketHandler is invoked whenever a wire packet arrives over any transport protocol.

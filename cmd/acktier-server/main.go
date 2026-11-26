@@ -19,11 +19,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/acktier/acktier/internal/owner"
-	"github.com/acktier/acktier/internal/secfile"
-	"github.com/acktier/acktier/internal/server/control"
-	"github.com/acktier/acktier/internal/server/relay"
-	"github.com/acktier/acktier/internal/server/store"
+	"github.com/ackwrap/acktier/internal/owner"
+	"github.com/ackwrap/acktier/internal/secfile"
+	"github.com/ackwrap/acktier/internal/server/control"
+	"github.com/ackwrap/acktier/internal/server/relay"
+	"github.com/ackwrap/acktier/internal/server/store"
 )
 
 const defaultAdminListenAddr = "127.0.0.1:8081"

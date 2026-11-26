@@ -4,8 +4,8 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/acktier/acktier/internal/server/acl"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/server/acl"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 func TestACLCompileTagsGroupsAndSubnets(t *testing.T) {

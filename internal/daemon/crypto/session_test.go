@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/acktier/acktier/internal/daemon/crypto"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/crypto"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 func TestHandshakeAndAEADSession(t *testing.T) {

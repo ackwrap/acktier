@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/acktier/acktier/pkg/acknet"
+	"github.com/ackwrap/acktier/pkg/acknet"
 )
 
 func main() {

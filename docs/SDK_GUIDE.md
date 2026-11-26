@@ -4,8 +4,8 @@ AckTier 将全部客户端能力封装为两个对外公开、零 `internal` 泄
 
 | SDK 包路径 | 对标模型 | 是否需要管理员/网卡驱动 | 适用场景 |
 | :--- | :--- | :--- | :--- |
-| `github.com/acktier/acktier/pkg/acknet` | Tailscale `tsnet` | **不需要**（100% 纯用户态） | 在任意 Go 服务内直接 `Listen` / `Dial` / `HTTPClient` / `SOCKS5` 接入加密组网 |
-| `github.com/acktier/acktier/pkg/client` | 嵌入式节点 + 控制 SDK | 可选（支持系统网卡、自定义 TUN、内存态） | 自研桌面 GUI、移动 VPN 壳（传入自定义 `PacketDevice` fd）、控制 `acktierd` 或管理控制端 |
+| `github.com/ackwrap/acktier/pkg/acknet` | Tailscale `tsnet` | **不需要**（100% 纯用户态） | 在任意 Go 服务内直接 `Listen` / `Dial` / `HTTPClient` / `SOCKS5` 接入加密组网 |
+| `github.com/ackwrap/acktier/pkg/client` | 嵌入式节点 + 控制 SDK | 可选（支持系统网卡、自定义 TUN、内存态） | 自研桌面 GUI、移动 VPN 壳（传入自定义 `PacketDevice` fd）、控制 `acktierd` 或管理控制端 |
 
 ---
 
@@ -25,7 +25,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/acktier/acktier/pkg/acknet"
+	"github.com/ackwrap/acktier/pkg/acknet"
 )
 
 func main() {

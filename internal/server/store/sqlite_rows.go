@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // JSON encodes individual structured records, not the database. Each heartbeat

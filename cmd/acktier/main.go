@@ -11,8 +11,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/acktier/acktier/pkg/client"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/client"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 func main() {

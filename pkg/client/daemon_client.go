@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/localapi"
-	"github.com/acktier/acktier/internal/securehttp"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/localapi"
+	"github.com/ackwrap/acktier/internal/securehttp"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // DefaultLocalAPIURL is the default loopback IPC endpoint of a running acktierd service.

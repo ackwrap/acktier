@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acktier/acktier/internal/server/control"
-	"github.com/acktier/acktier/internal/server/store"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/server/control"
+	"github.com/ackwrap/acktier/internal/server/store"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 func registerTestNode(t *testing.T, handler http.Handler, authKey, hostname string) types.RegisterResponse {

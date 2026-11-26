@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/nat"
-	"github.com/acktier/acktier/pkg/protocol"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/nat"
+	"github.com/ackwrap/acktier/pkg/protocol"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // PeerStatus summarizes live connectivity and traffic telemetry for CLI / GUI display.

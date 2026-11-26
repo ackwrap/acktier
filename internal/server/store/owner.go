@@ -6,8 +6,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/acktier/acktier/internal/owner"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/owner"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 var (

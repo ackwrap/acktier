@@ -2,6 +2,8 @@
 
 **AckTier** 是一款基于 **Go** 构建的跨平台新一代异地组网（Overlay Mesh SD-WAN）系统，融合 **Tailscale** 的集中控制与零信任治理体验，以及 **EasyTier** 的多协议抗封锁传输与对等节点多跳智能中继能力。
 
+项目仓库：[ackwrap/acktier](https://github.com/ackwrap/acktier)。Go 模块路径：`github.com/ackwrap/acktier`。
+
 完整架构设计与分阶段路线图详见 [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md)；系统能力矩阵与自动切换/自动中继机制详见 [docs/CAPABILITIES.md](docs/CAPABILITIES.md)；Go SDK 接入示例详见 [docs/SDK_GUIDE.md](docs/SDK_GUIDE.md)。
 
 ## 核心组件与公开 Go SDK

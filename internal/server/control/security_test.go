@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acktier/acktier/internal/server/control"
-	"github.com/acktier/acktier/internal/server/relay"
-	"github.com/acktier/acktier/internal/server/store"
-	"github.com/acktier/acktier/pkg/protocol"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/server/control"
+	"github.com/ackwrap/acktier/internal/server/relay"
+	"github.com/ackwrap/acktier/internal/server/store"
+	"github.com/ackwrap/acktier/pkg/protocol"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 func TestSecurity_PreAuthKeyTakeoverBlocked_UniqueNames_ACL_And_RouteBounds(t *testing.T) {

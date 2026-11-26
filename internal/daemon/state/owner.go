@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/acktier/acktier/internal/owner"
+	"github.com/ackwrap/acktier/internal/owner"
 )
 
 // OwnerState persists the pin and monotonic authorization watermark together.

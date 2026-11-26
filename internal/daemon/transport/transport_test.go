@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/transport"
-	"github.com/acktier/acktier/pkg/protocol"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/transport"
+	"github.com/ackwrap/acktier/pkg/protocol"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // --- In-memory Stream Switch (for TCP and TLS/WSS without OS sockets) ---

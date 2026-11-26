@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/engine"
-	"github.com/acktier/acktier/internal/secfile"
+	"github.com/ackwrap/acktier/internal/daemon/engine"
+	"github.com/ackwrap/acktier/internal/secfile"
 )
 
 const (

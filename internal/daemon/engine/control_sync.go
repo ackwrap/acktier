@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // applyNetMap is called under sessionMu.

@@ -7,9 +7,9 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/state"
-	"github.com/acktier/acktier/internal/owner"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/state"
+	"github.com/ackwrap/acktier/internal/owner"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 var errAwaitingOwner = errors.New("waiting for owner approval; retry 'acktier up' after the owner publishes authorization")

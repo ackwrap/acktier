@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // Hub aggregates multiple protocol Drivers (UDP, TCP, QUIC, WSS) under a single dispatch API.

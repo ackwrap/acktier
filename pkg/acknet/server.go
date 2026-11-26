@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/acktier/acktier/pkg/client"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/client"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // Server represents an in-process AckTier virtual node backed by a userspace TCP/UDP/ICMP stack.

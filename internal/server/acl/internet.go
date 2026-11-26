@@ -3,7 +3,7 @@ package acl
 import (
 	"net/netip"
 
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 var nonInternet = []netip.Prefix{

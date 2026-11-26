@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acktier/acktier/internal/server/control"
-	"github.com/acktier/acktier/internal/server/relay"
-	"github.com/acktier/acktier/internal/server/store"
-	"github.com/acktier/acktier/pkg/acknet"
-	"github.com/acktier/acktier/pkg/client"
+	"github.com/ackwrap/acktier/internal/server/control"
+	"github.com/ackwrap/acktier/internal/server/relay"
+	"github.com/ackwrap/acktier/internal/server/store"
+	"github.com/ackwrap/acktier/pkg/acknet"
+	"github.com/ackwrap/acktier/pkg/client"
 )
 
 // --- Sandbox-friendly in-memory HTTP & UDP helpers ---

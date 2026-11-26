@@ -12,10 +12,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/state"
-	"github.com/acktier/acktier/internal/daemon/tun"
-	"github.com/acktier/acktier/internal/owner"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/state"
+	"github.com/ackwrap/acktier/internal/daemon/tun"
+	"github.com/ackwrap/acktier/internal/owner"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 func TestOwnerKeepaliveCannotRenewSignedExpiry(t *testing.T) {

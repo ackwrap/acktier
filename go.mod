@@ -1,4 +1,4 @@
-module github.com/acktier/acktier
+module github.com/ackwrap/acktier
 
 go 1.25.0
 

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/acktier/acktier/internal/server/acl"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/server/acl"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // Policy is the human-maintained authorization source that the owner reviews

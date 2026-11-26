@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acktier/acktier/internal/securehttp"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/securehttp"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 // AdminClient is a typed Go SDK for managing an `acktier-server` Control Plane programmatically.

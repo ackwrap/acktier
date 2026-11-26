@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/mesh"
-	"github.com/acktier/acktier/internal/daemon/nat"
-	"github.com/acktier/acktier/pkg/protocol"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/mesh"
+	"github.com/ackwrap/acktier/internal/daemon/nat"
+	"github.com/ackwrap/acktier/pkg/protocol"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 const centerRelayPenaltyMs = 6.0

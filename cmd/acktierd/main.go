@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/localapi"
-	"github.com/acktier/acktier/pkg/client"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/localapi"
+	"github.com/ackwrap/acktier/pkg/client"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 func isLoopbackAddr(addr string) bool {

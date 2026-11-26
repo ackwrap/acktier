@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/acktier/acktier/internal/daemon/pktutil"
-	"github.com/acktier/acktier/pkg/types"
+	"github.com/ackwrap/acktier/internal/daemon/pktutil"
+	"github.com/ackwrap/acktier/pkg/types"
 )
 
 const (
