@@ -54,6 +54,15 @@ export function parseACLSource(text) {
   if (!knownFields(v, ['acls', 'groups', 'hosts']) || !Array.isArray(v.acls)) {
     throw new Error('请选择包含 acls 数组的 ACL JSON，不要选择私钥文件。');
   }
+  const stringList = (items) => items == null || (Array.isArray(items) && items.every((item) => typeof item === 'string'));
+  const valueMap = (map, check) => map == null ||
+    (typeof map === 'object' && !Array.isArray(map) && Object.values(map).every(check));
+  if (!v.acls.every((r) => knownFields(r, ['action', 'src', 'dst', 'proto']) &&
+      (r.action == null || typeof r.action === 'string') && (r.proto == null || typeof r.proto === 'string') &&
+      stringList(r.src) && stringList(r.dst)) ||
+      !valueMap(v.groups, stringList) || !valueMap(v.hosts, (ip) => typeof ip === 'string')) {
+    throw new Error('ACL JSON 字段格式不正确，请检查规则、组及主机别名。');
+  }
   return v;
 }
 

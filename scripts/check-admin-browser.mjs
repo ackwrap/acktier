@@ -245,7 +245,156 @@ try {
   assert.deepEqual(cloned.draft.policy.acl, acl);
   for (const { draft: { id } } of [draft, cloned]) await web(`drafts/${id}`, { method: 'DELETE' });
   await assert.rejects(web('drafts', { method: 'POST', body: { fromActive: true } }), /完整 policy\.json/);
-  console.log('Browser check passed: private files stayed local, stale previews were ignored, both drafts opened, and signed ACLs were preserved.');
+
+  // Use a new unsigned draft to prove that rule editing/JSON import cannot change the active authorization.
+  const activeBefore = await web('policy/active');
+  const visual = await web('drafts', { method: 'POST', body: { name: 'Visual ACL', policy: {
+    members: [{
+      id: 19, name: 'test-node', ipv4: '100.64.0.19', nodeKey: `nodekey:${'19'.repeat(32)}`,
+      tags: ['tag:dev'], routes: ['192.168.20.0/24'],
+    }],
+    dns: { enableMagicDNS: true, magicDNSSuffix: 'test.internal' },
+    stunAddr: '192.0.2.19:3478',
+    acl: {
+      groups: { 'group:office': ['tag:dev'] }, hosts: { 'office-lan': '192.168.20.0/24' },
+      acls: [
+        { action: 'accept', proto: 'TCP', src: ['group:office'], dst: ['2001:db8::443'] },
+        { action: 'drop', proto: 'tcp', src: ['node:19'], dst: ['office-lan:443'] },
+      ],
+    },
+  } } });
+  assert.equal(visual.analysis.valid, true);
+  const visualPath = `drafts/${visual.draft.id}`;
+  const visualRoute = `policy/${visual.draft.id}`;
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+  await view(visualRoute, 'ACL 与策略');
+
+  const one = (selector) => `document.querySelector(${JSON.stringify(selector)})`;
+  const click = (selector) => js(`${one(selector)}.click()`);
+  const byText = (scope, tag, label) =>
+    `[...document.querySelectorAll(${JSON.stringify(`${scope} ${tag}`)})].find(b => b.textContent.trim() === ${JSON.stringify(label)})`;
+  const clickText = (scope, tag, label) => js(`${byText(scope, tag, label)}.click()`);
+  const enter = (selector, value, event = 'input') => js(`(() => {
+    const field = ${one(selector)};
+    field.value = ${JSON.stringify(value)};
+    field.dispatchEvent(new Event(${JSON.stringify(event)}, {bubbles: true}));
+  })()`);
+  const editor = '.acl-editor';
+  const rows = '.acl-rule-table tbody tr';
+  const modal = '#modal-dialog';
+  const ruleForm = '.acl-rule-form';
+  const save = byText(editor, 'button', '校验并保存草稿');
+  const chooseManual = (selector) => js(`(() => {
+    const field = ${one(selector)};
+    field.value = field.options[field.options.length - 1].value;
+    field.dispatchEvent(new Event('change'));
+  })()`);
+  const waitClean = () => waitFor('ACL saved and reloaded', () => js(`!${one(editor)}?.hasAttribute('data-acl-dirty') && !!${one(editor)}`));
+  await waitFor('visual ACL default tab', () => js(`${one('.tablist [aria-selected=true]')}?.innerText === 'ACL 规则' && !!${one(rows)}`));
+  assert.match(await js(`${one(rows)}.innerText`), /2001:db8::443[\s\S]*全部端口/);
+
+  await click('button[aria-label="编辑第 1 条规则"]');
+  assert.equal(await js(`${one(modal)}.open && document.activeElement.name`), 'action');
+  await click(`${ruleForm} input[value=drop]`);
+  await js(`${one(ruleForm)}.requestSubmit()`);
+  assert.equal(await js(`${one(modal)}.open`), false);
+  await clickText(editor, 'button', '添加规则');
+  await click(`${ruleForm} input[value=accept]`);
+  await enter('#acl-src-1-selector', 'node:19', 'change');
+  await chooseManual('#acl-dst-1-selector');
+  await enter('#acl-dst-1-selector-manual', '2001:db8:19::/64');
+  await enter('#acl-dst-1-ports', '0');
+  await js(`${one(ruleForm)}.requestSubmit()`);
+  assert.ok(await js(`${one(modal)}.open && ${one('#acl-dst-1-ports')}.getAttribute('aria-invalid') === 'true'`));
+  await enter('#acl-dst-1-ports', '443, 8000-8010');
+  await clickText(ruleForm, 'button', '添加目标');
+  await enter('#acl-dst-2-selector', 'office-lan', 'change');
+  await enter('#acl-dst-2-ports', '*');
+  await js(`${one(ruleForm)}.requestSubmit()`);
+  assert.equal(await js(`${one(modal)}.open`), false);
+  assert.equal(await js(`document.querySelectorAll(${JSON.stringify(rows)}).length`), 3);
+
+  // Both the modern move and its fallback must retain row/control identity and keyboard focus.
+  const move = (n, fallback) => js(`(() => {
+    const button = ${one(`button[aria-label="上移第 ${n} 条规则"]`)};
+    const row = button.closest('tr');
+    if (${fallback}) row.parentElement.moveBefore = undefined;
+    button.focus();
+    button.click();
+    return document.activeElement === button && row === document.querySelectorAll(${JSON.stringify(rows)})[${n - 2}];
+  })()`);
+  assert.ok(await move(3, false), 'moving a rule lost focus or row identity');
+  assert.ok(await move(2, true), 'the fallback move lost focus or row identity');
+  await click('button[aria-label="删除第 3 条规则"]');
+  assert.equal(await js(`document.querySelectorAll(${JSON.stringify(rows)}).length`), 2);
+  assert.deepEqual((await web(visualPath)).draft.policy, visual.draft.policy, 'staged edits saved before confirmation');
+  await clickText('.tablist', 'button', '差异对比与导出');
+  assert.ok(await js(`${byText('#main-content', 'button', '导出待签 policy.json')}.disabled`));
+  await clickText('.tablist', 'button', 'ACL 规则');
+  await js(`window.confirmDraftOriginal = window.confirm; window.confirm = () => false; location.hash = '#overview';`);
+  await waitFor('declined navigation preserves ACL', () => js(`location.hash === ${JSON.stringify(`#${visualRoute}`)}`));
+  assert.ok(await js(`${one(editor)}.hasAttribute('data-acl-dirty')`));
+  await js(`window.confirm = window.confirmDraftOriginal; delete window.confirmDraftOriginal;`);
+  await js(`${save}.click()`);
+  await waitClean();
+
+  let savedVisual = await web(visualPath);
+  const expectedPolicy = {
+    ...visual.draft.policy, acl: { ...visual.draft.policy.acl, acls: [
+      { action: 'accept', proto: 'tcp', src: ['node:19'], dst: ['[2001:db8:19::/64]:443, 8000-8010', 'office-lan:*'] },
+      { ...visual.draft.policy.acl.acls[0], action: 'drop' },
+    ] },
+  };
+  assert.deepEqual(savedVisual.draft.policy, expectedPolicy);
+  assert.equal(savedVisual.analysis.rules[0].action, 'accept');
+  assert.equal(savedVisual.analysis.rules[0].ports, '443');
+  assert.deepEqual(savedVisual.analysis.rules[0].dst, ['2001:db8:19::/64']);
+  assert.deepEqual(await web('policy/active'), activeBefore);
+
+  await click('button[aria-label="编辑第 1 条规则"]');
+  await chooseManual('#acl-src-1-selector');
+  await enter('#acl-src-1-selector-manual', 'untrusted-hostname');
+  await js(`${one(ruleForm)}.requestSubmit()`);
+  await js(`${save}.click()`);
+  await waitFor('server rejects an untrusted selector', () => js(`${one('#acl-editor-error')}.hidden === false`));
+  assert.ok(await js(`${one(editor)}.hasAttribute('data-acl-dirty')`), 'a rejected save discarded local edits');
+  assert.deepEqual((await web(visualPath)).draft.policy, expectedPolicy);
+  await js(`window.confirmDraftOriginal = window.confirm; window.confirm = () => true;`);
+  await clickText(editor, 'button', '放弃改动');
+  await waitClean();
+  await js(`window.confirm = window.confirmDraftOriginal; delete window.confirmDraftOriginal;`);
+  assert.doesNotMatch(await js(`${one(rows)}.innerText`), /untrusted-hostname/);
+
+  const importedPath = join(dir, 'acl.json');
+  const importedACL = { ...expectedPolicy.acl, acls: [
+    { action: 'drop', proto: 'icmp', src: ['group:office'], dst: ['office-lan'] },
+  ] };
+  await writeFile(importedPath, JSON.stringify(importedACL));
+  const advanced = `${editor} details:first-of-type`;
+  await click(`${advanced} summary`);
+  await selectFile('#draft-acl-file', signerPath);
+  await waitFor('private file rejected by ACL import', () => js(`${one('#draft-acl-file')}.getAttribute('aria-invalid') === 'true'`));
+  assert.ok(await js(`${save}.disabled`));
+  await selectFile('#draft-acl-file', importedPath);
+  const load = byText(advanced, 'button', '载入规则表');
+  await waitFor('JSON loaded in local editor', () => js(`!${load}.disabled`));
+  await js(`${load}.click()`);
+  await waitFor('loaded JSON rendered as editable rules', () => js(`${one(rows)}.innerText.includes('ICMP')`));
+  assert.deepEqual((await web(visualPath)).draft.policy, expectedPolicy);
+  await js(`${save}.click()`);
+  await waitClean();
+  savedVisual = await web(visualPath);
+  assert.deepEqual(savedVisual.draft.policy, { ...expectedPolicy, acl: importedACL });
+  assert.deepEqual(await web('policy/active'), activeBefore);
+
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await waitFor('compact ACL layout', () => js(`getComputedStyle(${one(rows)}).display === 'block' && innerWidth === 390`));
+  assert.ok(await js('document.documentElement.scrollWidth <= innerWidth'), 'ACL overflows at mobile width');
+  await click('button[aria-label="编辑第 1 条规则"]');
+  assert.ok(await js(`${one(modal)}.open && ${one('#acl-dst-1-ports')}.disabled`), 'ICMP should not have an editable port');
+  await clickText(ruleForm, 'button', '取消');
+  assert.equal(await js(`${one(modal)}.open`), false);
+  console.log('Browser check passed: private files stayed local, stale previews were ignored, and visual ACL edits stayed in the draft.');
 } finally {
   if (cdp) {
     await Promise.race([cdp.send('Browser.close').catch(() => {}), delay(250)]);

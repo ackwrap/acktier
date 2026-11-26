@@ -26,6 +26,7 @@ test('serves the real frontend shell and independent Mock data', async (t) => {
   assert.equal(html.headers.get('Cache-Control'), 'no-store');
   assert.match(await html.text(), /MOCK · 演示数据/);
   assert.match((await request('/admin/assets/app.js')).headers.get('Content-Type'), /javascript/);
+  assert.match((await request('/admin/assets/acl_values.js')).headers.get('Content-Type'), /javascript/);
   assert.equal((await request('/api/v1/admin/nodes')).status, 404);
   assert.equal((await request('/admin/api/overview', { headers: { Origin: 'https://example.invalid' } })).status, 403);
 
@@ -69,6 +70,22 @@ test('draft, inventory and application code actions are in-memory only', async (
   const separate = await start(t);
   assert.equal((await separate.api('drafts')).length, 2);
   assert.ok(!(await separate.api('keys')).some((k) => k.id === created.row.id));
+});
+
+test('Mock ACL editing keeps destination addresses and ports distinct without publishing', async (t) => {
+  const { api } = await start(t);
+  const active = await api('policy/active');
+  const [draft] = await api('drafts');
+  const { draft: before } = await api(`drafts/${draft.id}`);
+  const acl = { ...before.policy.acl, acls: [
+    { action: 'accept', proto: 'tcp', src: ['node:1'], dst: ['[2001:db8::/64]:443, 8000-8010', 'node:2'] },
+  ] };
+  const saved = await api(`drafts/${draft.id}/acl`, 'POST', acl);
+  assert.deepEqual(saved.draft.policy, { ...before.policy, acl });
+  assert.deepEqual(saved.analysis.rules.slice(0, 3).map(({ ports }) => ports), ['443', '8000-8010', '*']);
+  assert.deepEqual(saved.analysis.rules[0].dst, ['2001:db8::/64']);
+  assert.match(saved.analysis.rules[2].dst[0], /hk-edge/);
+  assert.deepEqual(await api('policy/active'), active);
 });
 
 test('only the bundled demo envelope can be previewed and published', async (t) => {

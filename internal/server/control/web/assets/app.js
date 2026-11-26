@@ -5,6 +5,7 @@ import { readPublicArtifact } from './artifacts.js';
 import { renderOverview, renderRequests } from './views_overview.js';
 import { renderNodes } from './views_nodes.js';
 import { renderPolicy, renderPublish } from './views_policy.js';
+import { confirmDiscardACL } from './acl_editor.js';
 import { renderSecurity } from './views_security.js';
 
 const authShell = document.getElementById('auth-shell');
@@ -13,6 +14,8 @@ const appShell = document.getElementById('app-shell');
 const mainContent = document.getElementById('main-content');
 
 let currentSession = { authenticated: false, setupPending: true };
+let acceptedHash = window.location.hash;
+const canLeaveView = () => appShell.hidden || confirmDiscardACL(mainContent);
 
 function showShell(which) {
   authShell.hidden = which !== 'auth';
@@ -88,7 +91,7 @@ function parseRoute() {
 export function navTo(route) {
   const targetHash = '#' + route.replace(/^#/, '');
   if (window.location.hash === targetHash) {
-    renderCurrentRoute();
+    if (canLeaveView()) renderCurrentRoute();
   } else {
     window.location.hash = targetHash;
   }
@@ -273,6 +276,7 @@ function applySession(s) {
 }
 
 async function doLogout() {
+  if (!canLeaveView()) return;
   try {
     const s = await api('logout', { method: 'POST' });
     applySession(s);
@@ -292,7 +296,9 @@ async function boot() {
   document.getElementById('setup-theme-btn')?.addEventListener('click', toggleColorScheme);
   document.getElementById('logout-btn')?.addEventListener('click', doLogout);
   document.getElementById('setup-logout-btn')?.addEventListener('click', doLogout);
-  document.getElementById('refresh-view-btn')?.addEventListener('click', () => renderCurrentRoute());
+  document.getElementById('refresh-view-btn')?.addEventListener('click', () => {
+    if (canLeaveView()) renderCurrentRoute();
+  });
 
   onSessionExpired(() => {
     applySession({ authenticated: false, setupPending: currentSession.setupPending, passwordConfigured: true });
@@ -304,7 +310,21 @@ async function boot() {
     }
   });
 
-  window.addEventListener('hashchange', () => renderCurrentRoute());
+  window.addEventListener('hashchange', () => {
+    if (!canLeaveView()) {
+      const path = window.location.pathname + window.location.search;
+      window.history.replaceState(window.history.state, '', path + acceptedHash);
+      return;
+    }
+    acceptedHash = window.location.hash;
+    renderCurrentRoute();
+  });
+  window.addEventListener('beforeunload', (event) => {
+    if (!appShell.hidden && mainContent.querySelector('[data-acl-dirty]')) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  });
 
   try {
     const s = await api('session');

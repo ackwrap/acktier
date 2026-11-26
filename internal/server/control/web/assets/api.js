@@ -206,13 +206,14 @@ export function toast(message) {
 }
 
 // Modal <dialog> helpers following modern-web-guidance dialog rules.
-export function openModal(title, contentNode) {
+export function openModal(title, contentNode, { closedBy = 'any' } = {}) {
   const dlg = document.getElementById('modal-dialog');
   const titleEl = document.getElementById('modal-title');
   const bodyEl = document.getElementById('modal-body');
   titleEl.textContent = title;
   bodyEl.replaceChildren(contentNode);
   dlg.returnValue = '';
+  dlg.setAttribute('closedby', closedBy);
   if (!dlg.open) dlg.showModal();
 }
 
@@ -358,7 +359,9 @@ export function initPlatformEnhancements() {
     };
     let pressedOutside = false;
     dlg.addEventListener('pointerdown', (ev) => { pressedOutside = outside(ev); });
-    dlg.addEventListener('pointerup', (ev) => { if (pressedOutside && outside(ev)) dlg.close(); });
+    dlg.addEventListener('pointerup', (ev) => {
+      if (dlg.getAttribute('closedby') === 'any' && pressedOutside && outside(ev)) dlg.close();
+    });
   }
 
   // Two-state color-scheme toggle synced with <meta name="color-scheme">.

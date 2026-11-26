@@ -517,13 +517,13 @@ p code, li code, .callout code {
 
 .draft-layout {
   display: grid;
-  grid-template-columns: 18rem minmax(0, 1fr);
+  grid-template-columns: min(14rem, 21%) minmax(0, 1fr);
   gap: 1.1rem;
   align-items: start;
 }
-@media (width < 960px) {
+@media (width < 78rem) {
   .draft-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

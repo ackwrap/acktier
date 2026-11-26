@@ -1,7 +1,8 @@
 import {
-  api, downloadFile, el, badge, callout, makeDropzone, bindDropzone, copyableCode, fmtTime, toast, openModal, buildTabs,
+  api, downloadFile, el, badge, callout, bindDropzone, copyableCode, fmtTime, toast, openModal, buildTabs,
 } from './api.js';
-import { parseACLSource, parsePolicySource, readPublicArtifact } from './artifacts.js';
+import { confirmDiscardACL, renderACLEditor } from './acl_editor.js';
+import { parsePolicySource, readPublicArtifact } from './artifacts.js';
 
 function renderRuleTable(rules, captionText) {
   if (!rules || !rules.length) {
@@ -85,7 +86,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
           dataset: { draftId: d.id },
           'aria-pressed': d.id === selectedId ? 'true' : 'false',
           onClick: () => {
-            if (selectedId === d.id) return;
+            if (selectedId === d.id || !confirmDiscardACL(workspaceMount)) return;
             selectedId = d.id;
             for (const button of draftSidebarMount.querySelectorAll('.draft-item')) {
               const selected = button.dataset.draftId === selectedId;
@@ -107,8 +108,9 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     refreshGlobal();
   }
 
-  async function loadDraftWorkspace() {
+  async function loadDraftWorkspace(initialTab = 'acl', data = null) {
     const seq = ++workspaceSeq;
+    const afterACLSave = data !== null;
     if (!selectedId) {
       workspaceMount.replaceChildren(
         el('section', { class: 'card form-stack' },
@@ -122,13 +124,14 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     }
 
     const id = selectedId;
-    workspaceMount.replaceChildren(el('p', { role: 'status', class: 'muted' }, '正在加载草稿工作台…'));
-    let data;
-    try {
-      data = await api(`drafts/${encodeURIComponent(id)}`);
-    } catch (err) {
-      if (seq === workspaceSeq) workspaceMount.replaceChildren(callout('error', err.message));
-      return;
+    if (!data) {
+      workspaceMount.replaceChildren(el('p', { role: 'status', class: 'muted' }, '正在加载草稿工作台…'));
+      try {
+        data = await api(`drafts/${encodeURIComponent(id)}`);
+      } catch (err) {
+        if (seq === workspaceSeq) workspaceMount.replaceChildren(callout('error', err.message));
+        return;
+      }
     }
     if (seq !== workspaceSeq || id !== selectedId) return;
     const { draft, analysis } = data;
@@ -141,7 +144,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
       return callout(level === 'error' ? 'error' : 'warn', `${level === 'error' ? '校验错误：' : '核对提示：'}${text}`);
     });
 
-    // Tab 1: Members & DNS/STUN
+    // Members & DNS/STUN
     const dnsEnable = el('input', { type: 'checkbox', checked: !!pol.dns?.enableMagicDNS });
     const dnsSuffix = el('input', { type: 'text', value: pol.dns?.magicDNSSuffix || 'ack.internal', placeholder: 'ack.internal' });
     const stun1 = el('input', { type: 'text', value: pol.stunAddr || '', placeholder: '字面量 IP:端口，如 203.0.113.10:3478' });
@@ -175,12 +178,13 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
                 ),
               ),
               el('td', {}, el('button', {
-                type: 'button', class: 'btn danger sm btn-trash icon-start',
-                onClick: async () => {
-                  await api(`drafts/${encodeURIComponent(draft.id)}/members/${encodeURIComponent(m.nodeKey)}`, { method: 'DELETE' });
-                  toast(`已从草稿移除成员 ${m.name}`);
-                  reloadSidebar();
-                  loadDraftWorkspace();
+                 type: 'button', class: 'btn danger sm btn-trash icon-start',
+                 onClick: async () => {
+                   if (!confirmDiscardACL(workspaceMount)) return;
+                   await api(`drafts/${encodeURIComponent(draft.id)}/members/${encodeURIComponent(m.nodeKey)}`, { method: 'DELETE' });
+                   toast(`已从草稿移除成员 ${m.name}`);
+                   reloadSidebar();
+                   if (seq === workspaceSeq) loadDraftWorkspace('members');
                 },
               }, '移除')),
             ))),
@@ -198,97 +202,46 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
         ),
         el('div', { class: 'form-actions' },
           el('button', {
-            type: 'button', class: 'btn primary sm btn-check icon-start',
-            onClick: async () => {
+             type: 'button', class: 'btn primary sm btn-check icon-start',
+             onClick: async () => {
+               if (!confirmDiscardACL(workspaceMount)) return;
               const nextPol = structuredClone(pol);
               nextPol.dns = { enableMagicDNS: dnsEnable.checked, magicDNSSuffix: dnsSuffix.value.trim(), nameservers: pol.dns?.nameservers };
               nextPol.stunAddr = stun1.value.trim();
               nextPol.stunAltAddr = stun2.value.trim();
               await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: nextPol } });
-              toast('DNS 与 STUN 设置已更新到草稿');
-              reloadSidebar();
-              loadDraftWorkspace();
+               toast('DNS 与 STUN 设置已更新到草稿');
+               reloadSidebar();
+               if (seq === workspaceSeq) loadDraftWorkspace('members');
             },
           }, '保存 DNS / STUN 到草稿'),
         ),
       ),
     );
 
-    // Tab 2: ACL-only upload & rule breakdown (preserves members/DNS/routes)
-    const aclEditor = el('textarea', { class: 'code-editor', spellcheck: 'false' }, JSON.stringify(pol.acl || { acls: [] }, null, 2));
-    const aclErr = el('div', { class: 'callout error icon-start', role: 'alert', hidden: true });
-    const aclFile = el('input', {
-      type: 'file', id: 'draft-acl-file', accept: '.json,application/json',
-      onChange: async () => {
-        const f = aclFile.files?.[0];
-        if (!f) return;
-        aclErr.hidden = true;
-        aclFile.removeAttribute('aria-invalid');
-        try {
-          if (f.size > 256 * 1024) throw new Error('ACL 文件过大（最多 256 KiB）。');
-          const text = await f.text();
-          if (aclFile.files?.[0] !== f) return;
-          parseACLSource(text);
-          aclEditor.value = text;
-        } catch (err) {
-          if (aclFile.files?.[0] !== f) return;
-          aclFile.setAttribute('aria-invalid', 'true');
-          aclErr.textContent = err.message;
-          aclErr.hidden = false;
-        }
-      },
-    });
-    const aclTab = el('div', { class: 'form-stack' },
-      callout('',
-        '此处单独上传或编辑 ACL JSON 只会更新本草稿的 ',
-        el('code', {}, 'acl'),
-        ' 字段，绝不会隐式清空成员、DNS 或路由。选择器仅支持 ',
-        el('code', {}, 'node:<id>'), '、', el('code', {}, 'tag:<name>'), '、',
-        el('code', {}, 'group:<name>'), '、', el('code', {}, 'nodekey:<hex>'), '、',
-        el('code', {}, 'autogroup:internet'), ' 或显式 IP/CIDR（拒绝自报主机名；QUIC/WSS 属传输层而非 ACL 协议）。',
-      ),
-      aclErr,
-      el('div', { class: 'field' },
-        el('label', { for: 'draft-acl-file' }, '导入独立 ACL JSON 文件（可选）'),
-        makeDropzone(aclFile, '点击选择或拖拽 acl.json', '仅替换本草稿 acl 规则段，保留成员与路由配置'),
-      ),
-      el('div', { class: 'field' },
-        el('label', {}, 'ACL 策略 JSON（groups / hosts / acls）'),
-        el('div', { class: 'editor-frame' },
-          el('div', { class: 'editor-bar' },
-            el('span', { class: 'mono' }, 'acl.json'),
-            el('button', {
-              type: 'button', class: 'btn ghost sm',
-              onClick: () => {
-                try { aclEditor.value = JSON.stringify(JSON.parse(aclEditor.value), null, 2); } catch (e) { toast('JSON 语法有误：' + e.message); }
-              },
-            }, '格式化 JSON'),
-          ),
-          aclEditor,
-        ),
-      ),
-      el('div', { class: 'form-actions' },
-        el('button', {
-          type: 'button', class: 'btn primary btn-check icon-start',
-          onClick: async () => {
-            aclErr.hidden = true;
-            try {
-              const parsedACL = parseACLSource(aclEditor.value);
-              await api(`drafts/${encodeURIComponent(draft.id)}/acl`, { method: 'POST', body: parsedACL });
-              toast('ACL 已套用到草稿（成员与路由保持不变）');
-              reloadSidebar();
-              loadDraftWorkspace();
-            } catch (err) {
-              aclErr.textContent = err.message;
-              aclErr.hidden = false;
-            }
-          },
-        }, '校验并套用 ACL 到此草稿'),
-      ),
-      renderRuleTable(analysis.rules, `编译后底层包过滤规则预览（共 ${analysis.rules?.length || 0} 条）`),
+    const exportButtons = [];
+    const pendingNotice = el('p', { class: 'callout warn', hidden: true }, 'ACL 有未保存的改动。请返回「ACL 规则」保存后再对比和导出。');
+    const diffPreview = el('div', { class: 'form-stack' },
+      renderDiffSummary(analysis.diff),
+      renderRuleTable(analysis.rules, '待签发包过滤规则表'),
     );
+    const aclTab = renderACLEditor(draft,
+      analysis.valid
+        ? renderRuleTable(analysis.rules, `编译后的包过滤规则（${analysis.rules.length} 条）`)
+        : callout('warn', '草稿未通过校验，修正并保存后可查看编译结果。'),
+      (saved) => {
+        if (seq !== workspaceSeq || !workspaceMount.isConnected) return;
+        toast('ACL 草稿已保存，当前授权未改变。');
+        loadDraftWorkspace('acl', saved);
+        reloadSidebar().catch((err) => toast(err.message));
+      },
+      (pending) => {
+        pendingNotice.hidden = !pending;
+        diffPreview.hidden = pending;
+        for (const button of exportButtons) button.disabled = pending || !analysis.valid;
+      });
 
-    // Tab 3: Full policy.json editor & stateless live check
+    // Full policy.json editor & stateless check
     const fullEditor = el('textarea', { class: 'code-editor', spellcheck: 'false' }, JSON.stringify(pol, null, 2));
     const fullMsg = el('div', { hidden: true });
     const fullTab = el('div', { class: 'form-stack' },
@@ -330,12 +283,13 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
         el('button', {
           type: 'button', class: 'btn primary btn-check icon-start',
           onClick: async () => {
-            try {
-              const candidate = parsePolicySource(fullEditor.value);
-              await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: candidate } });
-              toast('完整策略草稿已保存');
-              reloadSidebar();
-              loadDraftWorkspace();
+             try {
+               const candidate = parsePolicySource(fullEditor.value);
+               if (!confirmDiscardACL(workspaceMount)) return;
+               await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: candidate } });
+               toast('完整策略草稿已保存');
+               reloadSidebar();
+               if (seq === workspaceSeq) loadDraftWorkspace('json');
             } catch (err) {
               fullMsg.className = 'callout error icon-start';
               fullMsg.textContent = err.message;
@@ -346,38 +300,43 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
       ),
     );
 
-    // Tab 4: Diff vs Active & Export for offline signing
+    // Diff vs Active & Export for offline signing
     const signCmd = `acktier owner sign --dir ./data/owner --policy ./${draft.id}-policy.json --valid-for 168h`;
+    const downloadDraft = async () => {
+      try {
+        await downloadFile(`drafts/${encodeURIComponent(draft.id)}/export`, `${draft.id}-policy.json`);
+        toast('已导出待签 policy.json');
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+    const exportButton = (label, size = '') => {
+      const button = el('button', {
+        type: 'button', class: `btn primary ${size} btn-download icon-start`, disabled: !analysis.valid, onClick: downloadDraft,
+      }, label);
+      exportButtons.push(button);
+      return button;
+    };
     const diffTab = el('div', { class: 'form-stack' },
-      renderDiffSummary(analysis.diff),
-      renderRuleTable(analysis.rules, '待签发包过滤规则表'),
+      pendingNotice,
+      diffPreview,
       el('div', { class: 'card form-stack' },
         el('h3', {}, '导出待签文件并在所有者客户端离线签发'),
         el('p', { class: 'muted' }, '网页与中心服务器均无私钥签名能力。请导出下方 JSON，在所有者电脑核对成员公钥与变更后执行签名命令，再前往「签名发布」上传生成的 authorization.json：'),
         terminalSnippet(signCmd, '复制本地签名命令'),
         el('div', { class: 'form-actions' },
-          el('button', {
-            type: 'button', class: 'btn primary btn-download icon-start', disabled: !analysis.valid,
-            onClick: async () => {
-              try {
-                await downloadFile(`drafts/${encodeURIComponent(draft.id)}/export`, `${draft.id}-policy.json`);
-                toast('已导出待签 policy.json');
-              } catch (err) {
-                toast(err.message);
-              }
-            },
-          }, '导出待签 policy.json'),
+          exportButton('导出待签 policy.json'),
           el('button', { type: 'button', class: 'btn secondary btn-upload icon-start', onClick: () => navTo('publish') }, '前往上传 authorization.json'),
         ),
       ),
     );
 
     const tabs = buildTabs('策略草稿工作区', [
+      { id: 'acl', title: 'ACL 规则', content: aclTab },
       { id: 'members', title: `成员与路由 (${pol.members?.length || 0})`, content: membersTab },
-      { id: 'acl', title: `ACL 规则 (${pol.acl?.acls?.length || 0})`, content: aclTab },
-      { id: 'json', title: '完整 JSON 编辑', content: fullTab },
       { id: 'diff', title: '差异对比与导出', content: diffTab },
-    ]);
+      { id: 'json', title: '完整策略 JSON', content: fullTab },
+    ], initialTab);
 
     workspaceMount.replaceChildren(
       el('section', { class: 'card form-stack' },
@@ -387,17 +346,15 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               el('h2', {}, draft.name),
               analysis.valid ? badge('校验通过', 'ok') : badge('存在错误', 'err'),
             ),
-            el('span', { class: 'muted' }, `草稿 ID: ${draft.id} · 最后保存：${fmtTime(draft.updatedAt)}`),
+            el('span', { class: 'muted' }, `最后保存：${fmtTime(draft.updatedAt)}`),
           ),
           el('div', { class: 'toolbar-row' },
+            exportButton('导出 policy.json', 'sm'),
             el('button', {
-              type: 'button', class: 'btn primary sm btn-download icon-start', disabled: !analysis.valid,
-              onClick: () => downloadFile(`drafts/${encodeURIComponent(draft.id)}/export`, `${draft.id}-policy.json`).catch((e) => toast(e.message)),
-            }, '导出 policy.json'),
-            el('button', {
-              type: 'button', class: 'btn danger sm btn-trash icon-start',
-              onClick: async () => {
-                await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'DELETE' });
+               type: 'button', class: 'btn danger sm btn-trash icon-start',
+               onClick: async () => {
+                 if (!confirmDiscardACL(workspaceMount)) return;
+                 await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'DELETE' });
                 selectedId = '';
                 toast('草稿已删除');
                 await reloadSidebar();
@@ -410,6 +367,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
         tabs.root,
       ),
     );
+    if (afterACLSave) aclTab.querySelector('h3').focus({ preventScroll: true });
   }
 
   const importFullInput = el('input', {
@@ -441,14 +399,16 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     el('div', { class: 'page-head' },
       el('div', {},
         el('h1', {}, 'ACL 与策略草稿编排'),
-        el('p', {}, '编排组网成员、ACL、DNS 与批准路由草稿，实时预编译校验并对比差异，导出完整 policy.json 供所有者离线签发。'),
+        el('p', {}, '在草稿中编辑访问规则和组网成员，核对差异后导出，交给所有者离线签发。'),
       ),
       el('div', { class: 'toolbar-row' },
         importFullInput,
-        el('button', { type: 'button', class: 'btn secondary btn-upload icon-start', onClick: () => importFullInput.click() }, '导入完整 policy.json'),
+        el('button', { type: 'button', class: 'btn secondary btn-upload icon-start',
+          onClick: () => { if (confirmDiscardACL(workspaceMount)) importFullInput.click(); } }, '导入完整 policy.json'),
         el('button', {
           type: 'button', class: 'btn primary btn-plus icon-start',
           onClick: async () => {
+            if (!confirmDiscardACL(workspaceMount)) return;
             try {
               const created = await api('drafts', { method: 'POST', body: { fromActive: true } });
               selectedId = created.draft.id;

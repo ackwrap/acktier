@@ -1,8 +1,9 @@
 import { hash, networkId } from './fixtures.mjs';
+import { aclAction, aclProtocol, splitACLTarget, validBusinessPorts } from '../../internal/server/control/web/assets/acl_values.js';
 
 const all = ['0.0.0.0/0（全部）', '::/0（全部）'];
 const aclEntries = (policy) => (policy.acl?.acls ?? []).map((entry, i) => ({
-  index: i + 1, action: entry?.action || 'accept', proto: entry?.proto || 'any',
+  index: i + 1, action: aclAction(entry?.action), proto: aclProtocol(entry?.proto),
   src: entry?.src, dst: entry?.dst,
 }));
 
@@ -23,12 +24,11 @@ function ruleRows(policy) {
   };
   return [
     ...aclEntries(policy).flatMap(({ action, proto, src, dst }) => dst.flatMap((raw) => {
-      // A separate column shows the business port even when the destination is a selector.
-      const port = raw.match(/:([\d*,-]+)$/);
-      const dest = port ? raw.slice(0, port.index) : raw;
-      return (port?.[1] ?? '*').split(',').map((ports) => ({
-        action, proto, src: src.flatMap((s) => labels(s)), dst: labels(dest), ports,
-      }));
+      const target = splitACLTarget(raw);
+      return (proto === 'icmp' ? ['icmp', 'icmpv6'] : [proto]).flatMap((p) =>
+        target.ports.split(',').map((ports) => ({
+          action, proto: p, src: src.flatMap((s) => labels(s.trim())), dst: labels(target.selector), ports: ports.trim(),
+        })));
     })),
     { action: 'drop', proto: 'any', src: all, dst: all, ports: '*' },
   ];
@@ -44,8 +44,8 @@ export function policyAnalysis(policy, baseVersion, active) {
     level: 'warning', message: `草稿基于 v${baseVersion}，当前生效的是 v${active.version}。`,
   });
   for (const entry of acl) {
-    if (!['accept', 'drop'].includes(entry.action) || typeof entry.proto !== 'string' || !/^(any|\*|tcp|udp|icmp|\d+)$/.test(entry.proto)
-      || !stringList(entry.src) || !entry.src.length || !stringList(entry.dst) || !entry.dst.length) {
+    if (!entry.action || !entry.proto || !stringList(entry.src) || !entry.src.length ||
+      !stringList(entry.dst) || !entry.dst.length || !entry.dst.every((d) => validBusinessPorts(splitACLTarget(d).ports))) {
       issues.push({ level: 'error', message: `规则 #${entry.index} 的动作、协议或选择器无效，QUIC/WSS 不是 ACL 业务协议。` });
     }
   }
@@ -80,7 +80,7 @@ export function publicationView(record) {
   const prefixes = (labels) => labels.map((label) => label.split(' · ').at(-1).split('（')[0]);
   const packetFilter = rules.map(({ action, proto, src, dst, ports }) => {
     const [start, end = start] = ports === '*' ? [0, 65535] : ports.split('-').map(Number);
-    const ipProto = { any: 0, tcp: 6, udp: 17 }[proto] ?? 0;
+    const ipProto = { any: 0, tcp: 6, udp: 17, icmp: 1, icmpv6: 58 }[proto] ?? Number(proto);
     return { action, ipProto, srcPrefixes: prefixes(src), dstPrefixes: prefixes(dst), dstPortStart: start, dstPortEnd: end };
   });
   return {
