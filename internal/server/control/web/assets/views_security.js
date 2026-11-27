@@ -1,3 +1,4 @@
+import { translateMessage } from './i18n.js';
 import {
   api, el, badge, createSearchInput, makeDropzone, copyableCode, terminalSnippet, fmtTime, toast, openModal, closeModal, confirmModal, setSessionCSRF,
 } from './api.js';
@@ -5,17 +6,17 @@ import { readPublicArtifact } from './artifacts.js';
 import { renderAuditRow } from './views_audit.js';
 
 const keyStateMeta = {
-  active: ['可用', 'ok'],
-  used: ['已使用', 'neutral'],
-  expired: ['已过期', 'warn'],
-  revoked: ['已吊销', 'err'],
+  active: [translateMessage("Available"), 'ok'],
+  used: [translateMessage("Used"), 'neutral'],
+  expired: [translateMessage("Expired"), 'warn'],
+  revoked: [translateMessage("Revoked"), 'err'],
 };
 
 const ttlPresets = [
-  [1, '1 小时'],
-  [24, '24 小时'],
-  [168, '7 天'],
-  [720, '30 天'],
+  [1, translateMessage("1 hour")],
+  [24, translateMessage("24 hours")],
+  [168, translateMessage("7 days")],
+  [720, translateMessage("30 days")],
 ];
 
 export async function renderSecurity(container, refreshGlobal) {
@@ -27,7 +28,7 @@ export async function renderSecurity(container, refreshGlobal) {
   let auditState = { q: '', page: 1, size: 15 };
 
   function openCreateKeyModal() {
-    const labelIn = el('input', { type: 'text', id: 'new-key-label', maxlength: 64, required: true, placeholder: '例如：上海办公室 NAS 入网申请', autofocus: true });
+    const labelIn = el('input', { type: 'text', id: 'new-key-label', maxlength: 64, required: true, placeholder: translateMessage("For example, office NAS enrollment"), autofocus: true });
     const ttlIn = el('input', { type: 'number', id: 'new-key-ttl', min: 1, max: 720, value: 24, required: true });
     const reuseCheck = el('input', { type: 'checkbox', id: 'new-key-reuse' });
     const errBox = el('div', { class: 'callout error icon-start', hidden: true });
@@ -62,24 +63,24 @@ export async function renderSecurity(container, refreshGlobal) {
             },
           });
           closeModal();
-          const joinCmd = `acktier up --server <中心节点地址> --auth-key "${created.key}"`;
+          const joinCmd = translateMessage("acktier up --server <CENTER_NODE_URL> --auth-key \"{0}\"", created.key);
           newKeyBanner.hidden = false;
           newKeyBanner.className = 'preview-card form-stack';
           newKeyBanner.replaceChildren(
             el('div', { class: 'toolbar-row between' },
-              badge('入网申请码已生成（一次性明文展示）', 'ok'),
-              el('span', { class: 'muted' }, '离开或刷新页面后中心仅保留哈希摘要，无法再次查看明文'),
+              badge(translateMessage("Enrollment key created"), 'ok'),
+              el('span', { class: 'muted' }, translateMessage("Copy the key now. After leaving or refreshing, only its digest remains.")),
             ),
             el('div', { class: 'field' },
-              el('label', {}, '申请码明文'),
-              copyableCode(created.key, '复制新生成的申请码'),
+              el('label', {}, translateMessage("Enrollment key")),
+              copyableCode(created.key, translateMessage("Copy new enrollment key")),
             ),
             el('div', { class: 'field' },
-              el('label', {}, '节点一键提交申请命令（请将 <中心节点地址> 替换为中心的节点监听 URL）'),
-              terminalSnippet(joinCmd, '复制节点入网申请命令'),
+              el('label', {}, translateMessage("Node join command. Replace <CENTER_NODE_URL> with the center's node listener URL.")),
+              terminalSnippet(joinCmd, translateMessage("Copy node join command")),
             ),
           );
-          toast('申请码已创建');
+          toast(translateMessage("Enrollment key created"));
           loadKeys();
           loadAudit();
           refreshGlobal();
@@ -90,70 +91,70 @@ export async function renderSecurity(container, refreshGlobal) {
       },
     },
       errBox,
-      el('div', { class: 'field' }, el('label', { for: 'new-key-label' }, '备注说明（必填）'), labelIn),
+      el('div', { class: 'field' }, el('label', { for: 'new-key-label' }, translateMessage("Note (required)")), labelIn),
       el('div', { class: 'field' },
-        el('label', { for: 'new-key-ttl' }, '有效时长（小时，1–720）'),
+        el('label', { for: 'new-key-ttl' }, translateMessage("Validity in hours (1–720)")),
         ttlIn,
         el('div', { class: 'preset-row' }, ...presetBtns),
-        el('p', { class: 'field-hint' }, '申请码仅允许节点向中心提交未验证入网申请，无法绕过所有者签名进入数据面。'),
+        el('p', { class: 'field-hint' }, translateMessage("An enrollment key permits a join request. A signed authorization grants access to the data plane.")),
       ),
       el('label', { class: 'checkbox-row', for: 'new-key-reuse' },
         reuseCheck,
-        el('span', {}, '允许在有效期内重复使用（默认单次使用，生产环境建议保持不勾选）'),
+        el('span', {}, translateMessage("Allow reuse until expiry. Leave unchecked for a single-use key.")),
       ),
       el('div', { class: 'form-actions' },
-        el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, '取消'),
-        el('button', { type: 'submit', class: 'btn primary btn-key icon-start' }, '生成申请码'),
+        el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, translateMessage("Cancel")),
+        el('button', { type: 'submit', class: 'btn primary btn-key icon-start' }, translateMessage("Generate key")),
       ),
     );
-    openModal('创建入网申请码', form);
+    openModal(translateMessage("Create enrollment key"), form);
   }
 
   async function loadKeys() {
     const keys = await api('keys');
     if (!keys.length) {
-      keysMount.replaceChildren(el('div', { class: 'empty-state' }, '暂无申请码记录。点击右上角可签发限时单次申请码。'));
+      keysMount.replaceChildren(el('div', { class: 'empty-state' }, translateMessage("No enrollment keys yet. Create a time-limited key to start.")));
       return;
     }
     keysMount.replaceChildren(
       el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-labelledby': 'keys-cap' },
         el('table', { class: 'tbl-keys' },
-          el('caption', { id: 'keys-cap' }, `申请码记录（共 ${keys.length} 条 · 不存储或回显明文）`),
+          el('caption', { id: 'keys-cap' }, translateMessage("Enrollment keys ({0}). Plaintext is shown only at creation.", keys.length)),
           el('thead', {}, el('tr', {},
-            el('th', { scope: 'col' }, '备注与 ID'),
-            el('th', { scope: 'col' }, '状态'),
-            el('th', { scope: 'col' }, '类型与使用次数'),
-            el('th', { scope: 'col' }, '到期时间'),
-            el('th', { scope: 'col' }, '操作'),
+            el('th', { scope: 'col' }, translateMessage("Note and ID")),
+            el('th', { scope: 'col' }, translateMessage("Status")),
+            el('th', { scope: 'col' }, translateMessage("Type and uses")),
+            el('th', { scope: 'col' }, translateMessage("Expires")),
+            el('th', { scope: 'col' }, translateMessage("Actions")),
           )),
           el('tbody', {}, keys.map((k) => {
             const [stText, stKind] = keyStateMeta[k.state] || [k.state, 'neutral'];
             return el('tr', {},
               el('th', { scope: 'row' },
-                el('div', {}, k.label || '未填写'),
+                el('div', {}, k.label || translateMessage("Not provided")),
                 el('code', { class: 'muted' }, k.id),
               ),
               el('td', {}, badge(stText, stKind)),
-              el('td', {}, el('span', { class: 'chip' }, k.reusable ? '可重复' : '单次'), ` 已用 ${k.usedCount} 次`),
+              el('td', {}, el('span', { class: 'chip' }, k.reusable ? translateMessage("Reusable") : translateMessage("Single use")), translateMessage(" · {0} use(s)", k.usedCount)),
               el('td', {}, fmtTime(k.expiresAt)),
               el('td', {}, k.state === 'active'
                 ? el('button', {
                   type: 'button', class: 'btn danger sm btn-trash icon-start',
                   onClick: async () => {
                     const ok = await confirmModal({
-                      title: '吊销入网申请码',
-                      message: `确认立即吊销申请码「${k.label || k.id}」吗？`,
-                      detail: '吊销后新设备无法再使用此申请码提交申请；已获所有者签发的组网成员不受影响。',
-                      confirmText: '确认吊销',
+                      title: translateMessage("Revoke enrollment key"),
+                      message: translateMessage("Revoke enrollment key {0} now?", k.label || k.id),
+                      detail: translateMessage("This key can no longer submit requests. Signed memberships stay active."),
+                      confirmText: translateMessage("Confirm revocation"),
                     });
                     if (!ok) return;
                     await api(`keys/${encodeURIComponent(k.id)}/revoke`, { method: 'POST' });
-                    toast('申请码已吊销（不影响已签成员权限）');
+                    toast(translateMessage("Enrollment key revoked"));
                     loadKeys();
                     loadAudit();
                     refreshGlobal();
                   },
-                }, '吊销')
+                }, translateMessage("Revoke"))
                 : '—'),
             );
           })),
@@ -175,7 +176,7 @@ export async function renderSecurity(container, refreshGlobal) {
           if (fileIn.files?.[0] !== f) return;
           fileIn.disabled = true;
           await api('delegation', { method: 'PUT', body: ct });
-          toast('控制端管理 API 委托已启用');
+          toast(translateMessage("Controller API delegation enabled"));
           loadDelegation();
           loadAudit();
         } catch (err) {
@@ -195,52 +196,52 @@ export async function renderSecurity(container, refreshGlobal) {
     delegMount.replaceChildren(
       el('div', { class: 'toolbar-row between' },
         el('div', { class: 'toolbar-row' },
-          el('h2', {}, '控制端管理 API 委托'),
-          d.enabled ? badge('已启用委托', 'ok') : badge('默认关闭', 'neutral'),
+          el('h2', {}, translateMessage("Controller API delegation")),
+          d.enabled ? badge(translateMessage("Delegated"), 'ok') : badge(translateMessage("Disabled"), 'neutral'),
         ),
         d.enabled
           ? el('button', {
             type: 'button', class: 'btn danger sm btn-trash icon-start',
             onClick: async () => {
               const ok = await confirmModal({
-                title: '取消控制端 API 委托',
-                message: '确认立即取消控制端管理 API 委托吗？',
-                detail: '取消后原控制端 CLI 管理凭据立即失效；线上已发布的签名策略与节点通信不受影响。',
-                confirmText: '确认取消委托',
+                title: translateMessage("Revoke controller delegation"),
+                message: translateMessage("Revoke controller API delegation now?"),
+                detail: translateMessage("The current controller credential expires immediately. Published policies and node connections stay active."),
+                confirmText: translateMessage("Confirm delegation revocation"),
               });
               if (!ok) return;
               await api('delegation', { method: 'DELETE' });
-              toast('已取消控制端委托，原 API 凭据已立即失效');
+              toast(translateMessage("Delegation revoked. The previous API credential is invalid."));
               loadDelegation();
               loadAudit();
             },
-          }, '立即取消委托')
+          }, translateMessage("Revoke delegation"))
           : null,
       ),
       el('p', { class: 'muted' },
-        '管理接口仅在独立管理端口开放，每次请求都需要 Ed25519 挑战签名。可在控制端运行 ',
+        translateMessage("The management listener requires an Ed25519 challenge signature for each request. On the controller, run "),
         el('code', {}, 'acktier owner controller-init --dir ./data/owner'),
-        ' 导出公开的 ',
+        translateMessage(" to export the public "),
         el('code', {}, 'controller-trust.json'),
-        '（与策略签名私钥严格分离）。',
+        translateMessage(". This credential is separate from the policy signing key."),
       ),
       d.enabled
         ? el('dl', { class: 'kv-grid' },
-          el('div', {}, el('dt', {}, '已绑定控制端管理公钥'), el('dd', {}, copyableCode(d.publicKey, '复制控制端管理公钥', true))),
-          el('div', {}, el('dt', {}, '委托备注'), el('dd', {}, d.label || '—')),
-          el('div', {}, el('dt', {}, '更新时间'), el('dd', {}, fmtTime(d.updatedAt))),
+          el('div', {}, el('dt', {}, translateMessage("Pinned controller management public key")), el('dd', {}, copyableCode(d.publicKey, translateMessage("Copy controller management public key"), true))),
+          el('div', {}, el('dt', {}, translateMessage("Delegation note")), el('dd', {}, d.label || '—')),
+          el('div', {}, el('dt', {}, translateMessage("Updated")), el('dd', {}, fmtTime(d.updatedAt))),
         )
         : null,
       el('div', { class: 'field' },
-        el('label', { for: 'controller-trust-file' }, d.enabled ? '轮换控制端管理公钥 (controller-trust.json)' : '上传 controller-trust.json 启用委托'),
-        makeDropzone(fileIn, '点击选择或拖拽 controller-trust.json', '浏览器将在本地校验公开委托格式并拦截任何私钥文件'),
+        el('label', { for: 'controller-trust-file' }, d.enabled ? translateMessage("Rotate the controller key with controller-trust.json") : translateMessage("Upload controller-trust.json to enable delegation")),
+        makeDropzone(fileIn, translateMessage("Select or drop controller-trust.json"), translateMessage("The browser validates the public delegation file and rejects private keys locally.")),
       ),
     );
   }
 
   // Password Change Card
-  const curPw = el('input', { type: 'password', id: 'pw-current', autocomplete: 'current-password', required: true, placeholder: '输入当前密码' });
-  const nextPw = el('input', { type: 'password', id: 'pw-next', autocomplete: 'new-password', minlength: 12, maxlength: 256, required: true, placeholder: '至少 12 个字符' });
+  const curPw = el('input', { type: 'password', id: 'pw-current', autocomplete: 'current-password', required: true, placeholder: translateMessage("Enter current password") });
+  const nextPw = el('input', { type: 'password', id: 'pw-next', autocomplete: 'new-password', minlength: 12, maxlength: 256, required: true, placeholder: translateMessage("At least 12 characters") });
   const pwMsg = el('div', { hidden: true });
   const pwForm = el('form', {
     class: 'form-stack',
@@ -256,7 +257,7 @@ export async function renderSecurity(container, refreshGlobal) {
         curPw.value = '';
         nextPw.value = '';
         pwMsg.className = 'callout ok icon-start';
-        pwMsg.textContent = '管理员密码已更新（Argon2id 慢哈希存储），其他所有登录会话已自动失效。';
+        pwMsg.textContent = translateMessage("Administrator password updated and stored as an Argon2id hash. Other sessions were revoked.");
         pwMsg.hidden = false;
         loadAudit();
       } catch (err) {
@@ -268,11 +269,11 @@ export async function renderSecurity(container, refreshGlobal) {
   },
     pwMsg,
     el('div', { class: 'form-row' },
-      el('div', { class: 'field' }, el('label', { for: 'pw-current' }, '当前管理员密码'), curPw),
-      el('div', { class: 'field' }, el('label', { for: 'pw-next' }, '新密码（12–256 字符）'), nextPw),
+      el('div', { class: 'field' }, el('label', { for: 'pw-current' }, translateMessage("Current administrator password")), curPw),
+      el('div', { class: 'field' }, el('label', { for: 'pw-next' }, translateMessage("New password (12–256 characters)")), nextPw),
     ),
     el('div', { class: 'form-actions' },
-      el('button', { type: 'submit', class: 'btn secondary btn-check icon-start' }, '更新密码并撤销其他会话'),
+      el('button', { type: 'submit', class: 'btn secondary btn-check icon-start' }, translateMessage("Update password and revoke other sessions")),
     ),
   );
 
@@ -283,59 +284,59 @@ export async function renderSecurity(container, refreshGlobal) {
       items.length
         ? el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-labelledby': 'audit-cap' },
           el('table', { class: 'tbl-audit' },
-            el('caption', { id: 'audit-cap' }, `安全审计记录（共 ${res.total} 条）`),
+            el('caption', { id: 'audit-cap' }, translateMessage("Security audit events ({0})", res.total)),
             el('thead', {}, el('tr', {},
-              el('th', { scope: 'col' }, '时间'),
-              el('th', { scope: 'col' }, '操作者'),
-              el('th', { scope: 'col' }, '动作'),
-              el('th', { scope: 'col' }, '目标'),
-              el('th', { scope: 'col' }, '结果与说明'),
+              el('th', { scope: 'col' }, translateMessage("Time")),
+              el('th', { scope: 'col' }, translateMessage("Actor")),
+              el('th', { scope: 'col' }, translateMessage("Action")),
+              el('th', { scope: 'col' }, translateMessage("Destination")),
+              el('th', { scope: 'col' }, translateMessage("Result and details")),
             )),
             el('tbody', {}, items.map(renderAuditRow)),
           ),
         )
-        : el('div', { class: 'empty-state' }, '无匹配的安全审计记录。'),
+        : el('div', { class: 'empty-state' }, translateMessage("No matching audit events.")),
     );
     const maxPage = Math.max(1, Math.ceil((res.total || 0) / auditState.size));
     auditPager.replaceChildren(
-      el('span', { class: 'muted' }, `共 ${res.total} 条 · 第 ${res.page} / ${maxPage} 页`),
+      el('span', { class: 'muted' }, translateMessage("{0} total · Page {1} of {2}", res.total, res.page, maxPage)),
       el('div', { class: 'toolbar-row' },
-        el('button', { type: 'button', class: 'btn secondary sm', disabled: auditState.page <= 1, onClick: () => { auditState.page--; loadAudit(); } }, '上一页'),
-        el('button', { type: 'button', class: 'btn secondary sm', disabled: auditState.page >= maxPage, onClick: () => { auditState.page++; loadAudit(); } }, '下一页'),
+        el('button', { type: 'button', class: 'btn secondary sm', disabled: auditState.page <= 1, onClick: () => { auditState.page--; loadAudit(); } }, translateMessage("Previous")),
+        el('button', { type: 'button', class: 'btn secondary sm', disabled: auditState.page >= maxPage, onClick: () => { auditState.page++; loadAudit(); } }, translateMessage("Next")),
       ),
     );
   }
 
   const auditSearchWidget = createSearchInput({
-    placeholder: '筛选动作、操作者或摘要…',
-    ariaLabel: '筛选审计日志',
+    placeholder: translateMessage("Filter by action, actor, or details…"),
+    ariaLabel: translateMessage("Filter audit events"),
     onSearch: (q) => { auditState.q = q; auditState.page = 1; loadAudit(); },
   });
 
   container.replaceChildren(
     el('div', { class: 'page-head' },
       el('div', {},
-        el('h1', {}, '入网申请码、控制端委托与安全审计'),
-        el('p', {}, '管理单次/限时申请码、控制端挑战签名 API 委托、Web 独立管理员密码及全量不可变审计记录。'),
+        el('h1', {}, translateMessage("Enrollment keys, delegation, and audit")),
+        el('p', {}, translateMessage("Manage enrollment keys, challenge-signed controller access, the Web administrator password, and audit events.")),
       ),
-      el('button', { type: 'button', class: 'btn primary btn-key icon-start', onClick: openCreateKeyModal }, '生成入网申请码'),
+      el('button', { type: 'button', class: 'btn primary btn-key icon-start', onClick: openCreateKeyModal }, translateMessage("Generate enrollment key")),
     ),
     newKeyBanner,
     el('section', { class: 'card form-stack' },
-      el('h2', {}, '入网申请码台账'),
+      el('h2', {}, translateMessage("Enrollment key inventory")),
       keysMount,
     ),
     el('div', { class: 'split-grid' },
       el('section', { class: 'card form-stack' }, delegMount),
       el('section', { class: 'card form-stack' },
-        el('h2', {}, '修改 Web 管理员密码'),
-        el('p', { class: 'muted' }, 'Web 密码独立于控制端凭据与节点令牌，使用随机盐 Argon2id 慢哈希持久化存储。'),
+        el('h2', {}, translateMessage("Change Web administrator password")),
+        el('p', { class: 'muted' }, translateMessage("The Web password is separate from controller credentials and node tokens. The center stores a salted Argon2id hash.")),
         pwForm,
       ),
     ),
     el('section', { class: 'card form-stack' },
       el('div', { class: 'toolbar-row between' },
-        el('h2', {}, '关键操作安全审计'),
+        el('h2', {}, translateMessage("Security audit")),
         auditSearchWidget,
       ),
       auditMount,

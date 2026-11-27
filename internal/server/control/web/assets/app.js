@@ -1,3 +1,4 @@
+import { applyDocumentLanguage, language, navigateWithLanguage, translateMessage } from './i18n.js';
 import {
   api, el, callout, bindDropzone, setSessionCSRF, onSessionExpired, initPlatformEnhancements, toggleColorScheme, toast,
 } from './api.js';
@@ -15,6 +16,7 @@ const mainContent = document.getElementById('main-content');
 
 let currentSession = { authenticated: false, setupPending: true };
 let acceptedHash = window.location.hash;
+let changingLanguage = false;
 const canLeaveView = () => appShell.hidden || confirmDiscardACL(mainContent);
 
 function showShell(which) {
@@ -141,7 +143,7 @@ async function renderCurrentRoute() {
         break;
     }
   } catch (err) {
-    mainContent.replaceChildren(callout('error', '加载页面失败：' + err.message));
+    mainContent.replaceChildren(callout('error', translateMessage("Could not load the page. ") + err.message));
   }
 }
 
@@ -154,9 +156,9 @@ function wireLoginView() {
   toggleBtn?.addEventListener('click', () => {
     const show = pwInput.type === 'password';
     pwInput.type = show ? 'text' : 'password';
-    toggleBtn.textContent = show ? '隐藏' : '显示';
+    toggleBtn.textContent = show ? translateMessage("Hide") : translateMessage("Show");
     toggleBtn.setAttribute('aria-pressed', show ? 'true' : 'false');
-    toggleBtn.setAttribute('aria-label', show ? '隐藏密码' : '显示密码');
+    toggleBtn.setAttribute('aria-label', show ? translateMessage("Hide password") : translateMessage("Show password"));
   });
 
   loginForm?.addEventListener('submit', async (e) => {
@@ -191,8 +193,8 @@ function wireSetupWizard() {
 
   bindDropzone(
     dropzone, fileInput, fileTitle, fileSub,
-    '点击选择或拖拽 trust.json 到此处',
-    '仅接受公开信任配置（上限 16 KiB），浏览器将在本地先行拦截任何私钥文件',
+    translateMessage("Select or drop trust.json here"),
+    translateMessage("Public trust files up to 16 KiB. The browser rejects private key files before upload."),
   );
 
   let stagedTrust = null;
@@ -245,7 +247,7 @@ function wireSetupWizard() {
         method: 'POST',
         body: { trust: stagedTrust, confirm: true },
       });
-      toast('已成功绑定所有者公钥，中心协调现已开启！');
+      toast(translateMessage("Owner bound. Center coordination is active."));
       const s = await api('session');
       applySession(s);
       await renderCurrentRoute();
@@ -266,11 +268,11 @@ function applySession(s) {
   const badgeEl = document.getElementById('auth-state-badge');
   if (badgeEl) {
     if (!currentSession.passwordConfigured) {
-      badgeEl.textContent = '等待配置管理员密码';
+      badgeEl.textContent = translateMessage("Administrator password setup required");
     } else if (currentSession.setupPending) {
-      badgeEl.textContent = '登录后绑定所有者';
+      badgeEl.textContent = translateMessage("Sign in to bind the owner");
     } else {
-      badgeEl.textContent = '所有者已绑定';
+      badgeEl.textContent = translateMessage("Owner bound");
     }
   }
 }
@@ -287,10 +289,23 @@ async function doLogout() {
 }
 
 async function boot() {
+  applyDocumentLanguage();
   initPlatformEnhancements();
   wireLoginView();
   wireSetupWizard();
   wireCompactNavigation();
+
+  for (const selector of document.querySelectorAll('[data-language-select]')) {
+    selector.addEventListener('change', () => {
+      if (selector.value === language) return;
+      if (!canLeaveView()) {
+        selector.value = language;
+        return;
+      }
+      changingLanguage = true;
+      navigateWithLanguage(selector.value);
+    });
+  }
 
   document.getElementById('theme-toggle-btn')?.addEventListener('click', toggleColorScheme);
   document.getElementById('setup-theme-btn')?.addEventListener('click', toggleColorScheme);
@@ -305,7 +320,7 @@ async function boot() {
     showShell('auth');
     const alertBox = document.getElementById('login-alert');
     if (alertBox) {
-      alertBox.textContent = '管理会话已过期或被重置，请重新登录。';
+      alertBox.textContent = translateMessage("The administrator session expired or was reset. Sign in again.");
       alertBox.hidden = false;
     }
   });
@@ -320,7 +335,7 @@ async function boot() {
     renderCurrentRoute();
   });
   window.addEventListener('beforeunload', (event) => {
-    if (!appShell.hidden && mainContent.querySelector('[data-acl-dirty]')) {
+    if (!changingLanguage && !appShell.hidden && mainContent.querySelector('[data-acl-dirty]')) {
       event.preventDefault();
       event.returnValue = '';
     }
