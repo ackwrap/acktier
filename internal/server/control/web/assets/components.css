@@ -627,25 +627,65 @@ tbody tr:hover td {
 }
 
 table.tbl-requests {
+  --c2: "OS"; --c3: "Node public key"; --c4: "Transports and reports"; --c5: "Advertised routes"; --c6: "Actions";
+}
+table.tbl-requests:lang(zh-CN) {
   --c2: "系统"; --c3: "节点公钥"; --c4: "传输与上报"; --c5: "申报路由"; --c6: "操作";
 }
 table.tbl-nodes {
+  --c2: "Node status"; --c3: "Overlay addresses"; --c4: "Node public key"; --c5: "Transports"; --c6: "Last report"; --c7: "Actions";
+}
+table.tbl-nodes:lang(zh-CN) {
   --c2: "角色状态"; --c3: "虚拟地址"; --c4: "节点公钥"; --c5: "传输能力"; --c6: "最近上报"; --c7: "操作";
 }
 table.tbl-members {
+  --c2: "Name"; --c3: "Overlay addresses"; --c4: "Node public key"; --c5: "Tags and routes"; --c6: "Actions";
+}
+table.tbl-members:lang(zh-CN) {
   --c2: "名称"; --c3: "虚拟地址"; --c4: "节点公钥"; --c5: "标签与路由"; --c6: "操作";
 }
 table.tbl-rules {
+  --c2: "Protocol"; --c3: "Source"; --c4: "Destination"; --c5: "Destination port";
+}
+table.tbl-rules:lang(zh-CN) {
   --c2: "协议"; --c3: "来源"; --c4: "目标"; --c5: "目的端口";
 }
 table.tbl-keys {
+  --c2: "Status"; --c3: "Uses"; --c4: "Expires"; --c5: "Actions";
+}
+table.tbl-keys:lang(zh-CN) {
   --c2: "状态"; --c3: "使用次数"; --c4: "到期时间"; --c5: "操作";
 }
 table.tbl-history {
+  --c2: "Snapshot digest"; --c3: "Members / rules"; --c4: "Expiry and status"; --c5: "Actions";
+}
+table.tbl-history:lang(zh-CN) {
   --c2: "快照摘要"; --c3: "成员 / 规则"; --c4: "到期时间与状态"; --c5: "操作";
 }
 table.tbl-audit {
+  --c2: "Actor"; --c3: "Action"; --c4: "Target"; --c5: "Result and details";
+}
+table.tbl-audit:lang(zh-CN) {
   --c2: "操作者"; --c3: "动作"; --c4: "目标"; --c5: "结果与说明";
+}
+
+:root:lang(zh-CN) {
+  --column-label-separator: "：";
+}
+
+.language-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-block: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.language-control select {
+  inline-size: auto;
+  min-block-size: 2rem;
+  padding: 0.25rem 0.5rem;
 }
 
 @container (width < 640px) {
@@ -667,12 +707,12 @@ table.tbl-audit {
   td {
     border-block-end: 1px dashed var(--border);
   }
-  td:nth-child(2)::before { content: var(--c2, "") "："; font-weight: 600; color: var(--muted); }
-  td:nth-child(3)::before { content: var(--c3, "") "："; font-weight: 600; color: var(--muted); }
-  td:nth-child(4)::before { content: var(--c4, "") "："; font-weight: 600; color: var(--muted); }
-  td:nth-child(5)::before { content: var(--c5, "") "："; font-weight: 600; color: var(--muted); }
-  td:nth-child(6)::before { content: var(--c6, "") "："; font-weight: 600; color: var(--muted); }
-  td:nth-child(7)::before { content: var(--c7, "") "："; font-weight: 600; color: var(--muted); }
+  td:nth-child(2)::before { content: var(--c2, "") var(--column-label-separator, ": "); font-weight: 600; color: var(--muted); }
+  td:nth-child(3)::before { content: var(--c3, "") var(--column-label-separator, ": "); font-weight: 600; color: var(--muted); }
+  td:nth-child(4)::before { content: var(--c4, "") var(--column-label-separator, ": "); font-weight: 600; color: var(--muted); }
+  td:nth-child(5)::before { content: var(--c5, "") var(--column-label-separator, ": "); font-weight: 600; color: var(--muted); }
+  td:nth-child(6)::before { content: var(--c6, "") var(--column-label-separator, ": "); font-weight: 600; color: var(--muted); }
+  td:nth-child(7)::before { content: var(--c7, "") var(--column-label-separator, ": "); font-weight: 600; color: var(--muted); }
 }
 
 /* Accessible Tabs */

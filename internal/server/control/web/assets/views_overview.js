@@ -1,3 +1,4 @@
+import { translateMessage } from './i18n.js';
 import {
   api, el, badge, callout, createSearchInput, copyableCode, fmtTime, fmtRelative, fmtBytes, fmtPortsMap, toast, openModal, closeModal,
 } from './api.js';
@@ -16,7 +17,7 @@ function buildTopologyCanvas(topo) {
   const nodes = topo?.nodes || [];
   const links = topo?.links || [];
   if (!nodes.length) {
-    return el('div', { class: 'empty-state' }, '尚无已签成员。完成首次策略签发并发布后，此处将渲染实时 P2P 链路、RTT 延迟与跳板拓扑。');
+    return el('div', { class: 'empty-state' }, translateMessage("Publish the first signed policy to see the member topology, RTT, and peer relays."));
   }
 
   const width = 780;
@@ -30,7 +31,7 @@ function buildTopologyCanvas(topo) {
     viewBox: `0 0 ${width} ${height}`,
     class: 'topo-svg',
     role: 'img',
-    'aria-label': '组网成员与实测链路拓扑图',
+    'aria-label': translateMessage("Network members and observed link topology"),
   });
 
   // Subtle dot-matrix background pattern + soft card drop-shadow
@@ -98,7 +99,7 @@ function buildTopologyCanvas(topo) {
     const link = svgEl('a', {
       href: `#nodes/${encodeURIComponent(node.key)}`,
       class: 'topo-node-link',
-      'aria-label': `查看节点 ${node.name} 的三方能力对照详情`,
+      'aria-label': translateMessage("View capability details for {0}", node.name),
     });
     if (node.online) {
       link.append(svgEl('circle', { cx: x, cy: y, r: 22, class: 'topo-halo' }));
@@ -111,7 +112,7 @@ function buildTopologyCanvas(topo) {
       class: node.online ? 'topo-node-online' : 'topo-node-offline',
     }));
 
-    const titleText = `${node.name}${node.canRelay ? ' · 跳板' : ''}`;
+    const titleText = `${node.name}${node.canRelay ? translateMessage(" · relay") : ''}`;
     const ipText = node.ip || '—';
     const plateW = Math.max(110, Math.max(titleText.length * 8.5, ipText.length * 7.2) + 20);
     const placeAbove = nodes.length > 1 && y < cy - 10;
@@ -132,11 +133,11 @@ function buildTopologyCanvas(topo) {
   return el('div', { class: 'topo-frame' },
     el('div', { class: 'topo-legend' },
       el('div', { class: 'topo-legend-items' },
-        el('span', { class: 'legend-item' }, el('span', { class: 'status-dot online' }), '在线成员'),
-        el('span', { class: 'legend-item' }, el('span', { class: 'status-dot warn' }), '支持对等跳板 (CanRelay)'),
-        el('span', { class: 'legend-item' }, el('span', { class: 'status-dot' }), '离线成员'),
+        el('span', { class: 'legend-item' }, el('span', { class: 'status-dot online' }), translateMessage("Online member")),
+        el('span', { class: 'legend-item' }, el('span', { class: 'status-dot warn' }), translateMessage("Peer relay capable (CanRelay)")),
+        el('span', { class: 'legend-item' }, el('span', { class: 'status-dot' }), translateMessage("Offline member")),
       ),
-      el('span', { class: 'muted' }, '点击任意节点可查看三方能力对照详情'),
+      el('span', { class: 'muted' }, translateMessage("Select a node to compare its capabilities.")),
     ),
     svg,
   );
@@ -167,10 +168,10 @@ export async function renderOverview(container, navTo, updateChrome) {
   let authSection;
   if (!auth) {
     authSection = callout('warn',
-      el('strong', {}, '尚未发布任何已签授权快照。'),
-      ' 当前所有者公钥已锁定，但数据面尚无生效成员表。请先在「入网申请」核对设备公钥并加入草稿，导出后在所有者电脑本地执行 ',
+      el('strong', {}, translateMessage("No signed authorization published.")),
+      translateMessage(" The owner key is pinned. To authorize members, verify their keys in Join requests, add them to a draft, export the policy, and run "),
       el('code', {}, 'acktier owner sign'),
-      '，再到「签名发布」上传 ',
+      translateMessage(" on the owner computer. Then open Publish authorization and upload "),
       el('code', {}, 'authorization.json'),
       '。',
     );
@@ -181,13 +182,13 @@ export async function renderOverview(container, navTo, updateChrome) {
     const barState = auth.expired ? 'err' : hoursLeft < 24 ? 'warn' : 'ok';
     authSection = el('div', { class: 'form-stack' },
       el('div', { class: 'toolbar-row between' },
-        auth.expired ? badge('授权已过期（节点数据面停用）', 'err') : badge(`有效期内 · 约剩 ${hoursLeft} 小时`, hoursLeft < 24 ? 'warn' : 'ok'),
-        el('span', { class: 'muted' }, `到期时间：${fmtTime(auth.expiresAt)}`),
+        auth.expired ? badge(translateMessage("Authorization expired (node data plane suspended)"), 'err') : badge(translateMessage("Valid · About {0} hour(s) remaining", hoursLeft), hoursLeft < 24 ? 'warn' : 'ok'),
+        el('span', { class: 'muted' }, translateMessage("Expires {0}", fmtTime(auth.expiresAt))),
       ),
-      el('progress', { class: `expiry-bar ${barState}`, value: pct, max: 100, 'aria-label': '授权剩余有效期比例' }),
+      el('progress', { class: `expiry-bar ${barState}`, value: pct, max: 100, 'aria-label': translateMessage("Remaining authorization lifetime") }),
       el('dl', { class: 'kv-grid' },
-        el('div', {}, el('dt', {}, '快照 SHA-256 摘要'), el('dd', {}, copyableCode(auth.digest, '复制快照摘要', true))),
-        el('div', {}, el('dt', {}, '已签成员 / 编译规则'), el('dd', {}, `${auth.members} 台成员 · ${auth.rules} 条过滤规则`)),
+        el('div', {}, el('dt', {}, translateMessage("Snapshot SHA-256 digest")), el('dd', {}, copyableCode(auth.digest, translateMessage("Copy snapshot digest"), true))),
+        el('div', {}, el('dt', {}, translateMessage("Signed members / compiled rules")), el('dd', {}, translateMessage("{0} member(s) · {1} filter rule(s)", auth.members, auth.rules))),
       ),
     );
   }
@@ -197,56 +198,56 @@ export async function renderOverview(container, navTo, updateChrome) {
   container.replaceChildren(
     el('div', { class: 'page-head' },
       el('div', {},
-        el('h1', {}, '概览与实时协调状态'),
-        el('p', {}, '严格区分「所有者信任根已绑定」「快照已签成员」与「中心协调流心跳」三种独立状态。'),
+        el('h1', {}, translateMessage("Overview and coordination")),
+        el('p', {}, translateMessage("Root binding, signed membership, and control-stream heartbeats represent independent states.")),
       ),
       el('div', { class: 'toolbar-row' },
-        el('button', { type: 'button', class: 'btn secondary', onClick: () => navTo('requests') }, `入网申请 (${counts.requests || 0})`),
-        el('button', { type: 'button', class: 'btn primary btn-upload icon-start', onClick: () => navTo('publish') }, '上传已签授权'),
+        el('button', { type: 'button', class: 'btn secondary', onClick: () => navTo('requests') }, translateMessage("Join requests ({0})", counts.requests || 0)),
+        el('button', { type: 'button', class: 'btn primary btn-upload icon-start', onClick: () => navTo('publish') }, translateMessage("Upload signed authorization")),
       ),
     ),
 
     el('div', { class: 'kpi-grid' },
-      kpiCard('根信任状态', '已锁定', '查看授权发布与历史记录', 'kpi-icon-trust', '#publish'),
-      kpiCard('已签授权成员', String(counts.members || 0), auth ? '点击筛选全部已签成员' : '尚未发布授权', 'kpi-icon-members', '#nodes/status:member'),
-      kpiCard('协调流在线', `${counts.membersOnline || 0} / ${counts.members || 0}`, '仅代表中心控制流心跳', 'kpi-icon-online', '#nodes/status:member'),
-      kpiCard('待审入网申请', String(counts.requests || 0), '点击核对公钥并加入草稿', 'kpi-icon-requests', '#requests'),
-      kpiCard('待签策略草稿', String(counts.drafts || 0), `可用申请码 ${counts.keysActive || 0} 个`, 'kpi-icon-drafts', '#policy'),
-      kpiCard('中心密文中继', `${relay.clients || 0} 会话`, `转发 ${relay.frames || 0} 帧 (${fmtBytes(relay.bytes)})`, 'kpi-icon-relay'),
+      kpiCard(translateMessage("Root trust"), translateMessage("Pinned"), translateMessage("View authorization and history"), 'kpi-icon-trust', '#publish'),
+      kpiCard(translateMessage("Signed members"), String(counts.members || 0), auth ? translateMessage("Show all signed members") : translateMessage("No authorization published"), 'kpi-icon-members', '#nodes/status:member'),
+      kpiCard(translateMessage("Control stream online"), `${counts.membersOnline || 0} / ${counts.members || 0}`, translateMessage("Based on the center's control-stream heartbeat"), 'kpi-icon-online', '#nodes/status:member'),
+      kpiCard(translateMessage("Pending join requests"), String(counts.requests || 0), translateMessage("Review keys and add to a draft"), 'kpi-icon-requests', '#requests'),
+      kpiCard(translateMessage("Unsigned policy drafts"), String(counts.drafts || 0), translateMessage("{0} available enrollment key(s)", counts.keysActive || 0), 'kpi-icon-drafts', '#policy'),
+      kpiCard(translateMessage("Center relay"), translateMessage("{0} session(s)", relay.clients || 0), translateMessage("Forwarded {0} frames ({1})", relay.frames || 0, fmtBytes(relay.bytes)), 'kpi-icon-relay'),
     ),
 
     el('section', { class: 'card form-stack' },
-      el('h2', {}, '授权状态'),
+      el('h2', {}, translateMessage("Authorization status")),
       authSection,
     ),
 
     el('section', { class: 'card form-stack' },
       el('div', { class: 'toolbar-row between' },
-        el('h2', {}, '组网成员与实测链路拓扑'),
-        el('button', { type: 'button', class: 'btn ghost sm', onClick: () => navTo('nodes') }, '查看全部设备台账'),
+        el('h2', {}, translateMessage("Member and link topology")),
+        el('button', { type: 'button', class: 'btn ghost sm', onClick: () => navTo('nodes') }, translateMessage("View all nodes")),
       ),
       buildTopologyCanvas(data.topology),
     ),
 
     el('section', { class: 'card form-stack' },
       el('div', { class: 'toolbar-row between' },
-        el('h2', {}, '最近关键操作审计'),
-        el('button', { type: 'button', class: 'btn ghost sm', onClick: () => navTo('security') }, '查看完整审计日志'),
+        el('h2', {}, translateMessage("Recent audit events")),
+        el('button', { type: 'button', class: 'btn ghost sm', onClick: () => navTo('security') }, translateMessage("View full audit log")),
       ),
       auditRows.length
-        ? el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-label': '最近关键操作记录' },
+        ? el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-label': translateMessage("Recent actions") },
           el('table', { class: 'tbl-audit' },
             el('thead', {}, el('tr', {},
-              el('th', { scope: 'col' }, '时间'),
-              el('th', { scope: 'col' }, '操作者'),
-              el('th', { scope: 'col' }, '动作'),
-              el('th', { scope: 'col' }, '目标'),
-              el('th', { scope: 'col' }, '结果与说明'),
+              el('th', { scope: 'col' }, translateMessage("Time")),
+              el('th', { scope: 'col' }, translateMessage("Actor")),
+              el('th', { scope: 'col' }, translateMessage("Action")),
+              el('th', { scope: 'col' }, translateMessage("Destination")),
+              el('th', { scope: 'col' }, translateMessage("Result and details")),
             )),
             el('tbody', {}, auditRows),
           ),
         )
-        : el('div', { class: 'empty-state' }, '暂无管理审计记录。'),
+        : el('div', { class: 'empty-state' }, translateMessage("No audit events yet.")),
     ),
   );
 }
@@ -254,23 +255,23 @@ export async function renderOverview(container, navTo, updateChrome) {
 export async function openAddMemberModal(reqRow, navTo) {
   const drafts = await api('drafts');
   const draftSelect = el('select', { id: 'add-draft-id' },
-    el('option', { value: '__new__' }, '＋ 新建一份基于当前生效快照的草稿'),
-    ...drafts.map((d) => el('option', { value: d.id }, `${d.name}（${d.members} 成员）`)),
+    el('option', { value: '__new__' }, translateMessage("＋ Create a draft from the active snapshot")),
+    ...drafts.map((d) => el('option', { value: d.id }, translateMessage("{0} ({1} member(s))", d.name, d.members))),
   );
   if (drafts.length > 0) draftSelect.value = drafts[0].id;
 
   const nameInput = el('input', {
-    type: 'text', id: 'add-member-name', placeholder: '留空则按申请名规范化分配',
+    type: 'text', id: 'add-member-name', placeholder: translateMessage("Leave blank to derive a name from the request"),
     value: (reqRow.hostname || '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, ''),
   });
-  const ipInput = el('input', { type: 'text', id: 'add-member-ip', placeholder: '留空则自动分配 100.64.x.y' });
-  const tagsInput = el('input', { type: 'text', id: 'add-member-tags', placeholder: '可选，逗号分隔，如 tag:dev, tag:server' });
+  const ipInput = el('input', { type: 'text', id: 'add-member-ip', placeholder: translateMessage("Leave blank to assign an address in 100.64.x.y") });
+  const tagsInput = el('input', { type: 'text', id: 'add-member-tags', placeholder: translateMessage("Optional comma-separated tags, such as tag:dev, tag:server") });
 
   const routeChecks = (reqRow.advertisedRoutes || []).map((rt) => {
     const cb = el('input', { type: 'checkbox', value: rt });
     return { cb, row: el('label', { class: 'checkbox-row' }, cb, el('code', {}, rt)) };
   });
-  const extraRoutes = el('input', { type: 'text', id: 'add-member-routes', placeholder: '额外批准 CIDR（可选，逗号分隔）' });
+  const extraRoutes = el('input', { type: 'text', id: 'add-member-routes', placeholder: translateMessage("Additional approved CIDRs (optional, comma-separated)") });
   const addExitChip = el('button', {
     type: 'button', class: 'preset-chip',
     onClick: () => {
@@ -278,7 +279,7 @@ export async function openAddMemberModal(reqRow, navTo) {
       if (!parts.includes('0.0.0.0/0')) parts.push('0.0.0.0/0');
       extraRoutes.value = parts.join(', ');
     },
-  }, '＋ 填入全局出口 0.0.0.0/0');
+  }, translateMessage("＋ Add default exit route 0.0.0.0/0"));
   const errBox = el('div', { class: 'callout error icon-start', hidden: true });
 
   const form = el('form', {
@@ -291,7 +292,7 @@ export async function openAddMemberModal(reqRow, navTo) {
         if (draftId === '__new__') {
           const created = await api('drafts', {
             method: 'POST',
-            body: { name: `入网变更草稿 (${reqRow.hostname || '新节点'})`, fromActive: true },
+            body: { name: translateMessage("Enrollment draft ({0})", reqRow.hostname || translateMessage("New node")), fromActive: true },
           });
           draftId = created.draft.id;
         }
@@ -311,7 +312,7 @@ export async function openAddMemberModal(reqRow, navTo) {
           },
         });
         closeModal();
-        toast('已将节点加入策略草稿（尚未生效，需导出给所有者本地签名发布）');
+        toast(translateMessage("Node added to the draft. The owner must sign and publish it to grant access."));
         navTo(`policy/${draftId}`);
       } catch (err) {
         errBox.textContent = err.message;
@@ -320,44 +321,44 @@ export async function openAddMemberModal(reqRow, navTo) {
     },
   },
     callout('warn',
-      '注意：将节点加入草稿不会授予任何组网权限。请务必通过节点本机执行 ',
+      translateMessage("Verify the public key before granting access. Run "),
       el('code', {}, 'acktier owner node-key'),
-      ' 或其他独立可信渠道核对下方公钥！',
+      translateMessage(" on the node or use another trusted channel."),
     ),
     errBox,
     el('div', { class: 'field' },
-      el('label', {}, '待核对节点公钥'),
-      copyableCode(reqRow.nodeKey, '复制申请节点公钥'),
+      el('label', {}, translateMessage("Node public key to verify")),
+      copyableCode(reqRow.nodeKey, translateMessage("Copy requesting node's public key")),
     ),
     el('div', { class: 'field' },
-      el('label', { for: 'add-draft-id' }, '目标策略草稿'),
+      el('label', { for: 'add-draft-id' }, translateMessage("Target policy draft")),
       draftSelect,
     ),
     el('div', { class: 'form-row' },
-      el('div', { class: 'field' }, el('label', { for: 'add-member-name' }, '签发唯一 DNS 名称'), nameInput),
-      el('div', { class: 'field' }, el('label', { for: 'add-member-ip' }, '签发虚拟 IPv4'), ipInput),
+      el('div', { class: 'field' }, el('label', { for: 'add-member-name' }, translateMessage("Signed DNS name")), nameInput),
+      el('div', { class: 'field' }, el('label', { for: 'add-member-ip' }, translateMessage("Signed overlay IPv4")), ipInput),
     ),
     el('div', { class: 'field' },
-      el('label', { for: 'add-member-tags' }, '管理员授予标签（用于 ACL 选择器）'),
+      el('label', { for: 'add-member-tags' }, translateMessage("Administrator-assigned ACL tags")),
       tagsInput,
     ),
     routeChecks.length
       ? el('div', { class: 'field' },
-        el('label', {}, '节点自报网段（默认不勾选，核实后按需批准）'),
+        el('label', {}, translateMessage("Node-advertised subnets (select only after verification)")),
         ...routeChecks.map((x) => x.row),
       )
       : null,
     el('div', { class: 'field' },
-      el('label', { for: 'add-member-routes' }, '附加批准子网 / 出口路由'),
+      el('label', { for: 'add-member-routes' }, translateMessage("Additional approved subnets and exits")),
       extraRoutes,
       el('div', { class: 'preset-row' }, addExitChip),
     ),
     el('div', { class: 'form-actions' },
-      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal, autofocus: true }, '取消'),
-      el('button', { type: 'submit', class: 'btn primary btn-plus icon-start' }, '加入策略草稿'),
+      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal, autofocus: true }, translateMessage("Cancel")),
+      el('button', { type: 'submit', class: 'btn primary btn-plus icon-start' }, translateMessage("Add to policy draft")),
     ),
   );
-  openModal('核对申请并加入策略草稿', form);
+  openModal(translateMessage("Review request and add to a draft"), form);
 }
 
 export async function renderRequests(container, navTo) {
@@ -366,8 +367,8 @@ export async function renderRequests(container, navTo) {
   const pagerMount = el('div', { class: 'toolbar-row between' });
 
   const searchWidget = createSearchInput({
-    placeholder: '搜索自报主机名、操作系统或节点公钥…',
-    ariaLabel: '搜索入网申请',
+    placeholder: translateMessage("Search by reported hostname, OS, or node public key…"),
+    ariaLabel: translateMessage("Search join requests"),
     onSearch: (q) => {
       state.q = q;
       state.page = 1;
@@ -380,7 +381,7 @@ export async function renderRequests(container, navTo) {
     const items = res.items || [];
     if (!items.length) {
       tableMount.replaceChildren(el('div', { class: 'empty-state' },
-        state.q ? '没有匹配筛选条件的入网申请。' : '当前没有待处理的入网申请。节点使用申请码执行 acktier up 后会在此显示。'));
+        state.q ? translateMessage("No join requests match the filters.") : translateMessage("No pending join requests. Requests appear after a node runs acktier up with an enrollment key.")));
     } else {
       const rows = items.map((r) => {
         const ports = fmtPortsMap(r.transportPorts);
@@ -388,17 +389,17 @@ export async function renderRequests(container, navTo) {
           el('th', { scope: 'row' },
             el('div', { class: 'node-title' },
               el('span', { class: 'status-dot warn' }),
-              r.hostname || '未填写主机名',
+              r.hostname || translateMessage("No hostname provided"),
             ),
-            el('span', { class: 'muted' }, '未核验自报主机名'),
+            el('span', { class: 'muted' }, translateMessage("Unverified hostname")),
           ),
           el('td', {}, el('span', { class: 'chip' }, r.os || 'unknown')),
-          el('td', {}, copyableCode(r.nodeKey, '复制节点公钥', true)),
+          el('td', {}, copyableCode(r.nodeKey, translateMessage("Copy node public key"), true)),
           el('td', {},
             ports
               ? el('div', { class: 'chip-list' }, ...ports.map((p) => el('code', { class: 'chip' }, p)))
-              : badge('监听端口：未上报', 'neutral'),
-            el('div', { class: 'muted' }, `候选地址 ${r.endpoints || 0} 个 · ${fmtRelative(r.lastSeen)}`),
+              : badge(translateMessage("No transport listeners reported"), 'neutral'),
+            el('div', { class: 'muted' }, translateMessage("{0} candidate(s) · {1}", r.endpoints || 0, fmtRelative(r.lastSeen))),
           ),
           el('td', {},
             (r.advertisedRoutes || []).length
@@ -407,8 +408,8 @@ export async function renderRequests(container, navTo) {
           ),
           el('td', {},
             el('div', { class: 'toolbar-row' },
-              el('button', { type: 'button', class: 'btn primary sm btn-plus icon-start', onClick: () => openAddMemberModal(r, navTo) }, '加入草稿'),
-              el('button', { type: 'button', class: 'btn secondary sm', onClick: () => navTo(`nodes/${encodeURIComponent(r.nodeKey)}`) }, '详情'),
+              el('button', { type: 'button', class: 'btn primary sm btn-plus icon-start', onClick: () => openAddMemberModal(r, navTo) }, translateMessage("Add to draft")),
+              el('button', { type: 'button', class: 'btn secondary sm', onClick: () => navTo(`nodes/${encodeURIComponent(r.nodeKey)}`) }, translateMessage("Details")),
             ),
           ),
         );
@@ -416,14 +417,14 @@ export async function renderRequests(container, navTo) {
       tableMount.replaceChildren(
         el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-labelledby': 'req-cap' },
           el('table', { class: 'tbl-requests' },
-            el('caption', { id: 'req-cap' }, `待处理入网申请（共 ${res.total} 条，当前第 ${res.page} 页）`),
+            el('caption', { id: 'req-cap' }, translateMessage("Pending join requests ({0} total, page {1})", res.total, res.page)),
             el('thead', {}, el('tr', {},
-              el('th', { scope: 'col' }, '申请设备'),
-              el('th', { scope: 'col' }, '系统'),
-              el('th', { scope: 'col' }, '节点公钥'),
-              el('th', { scope: 'col' }, '传输与上报'),
-              el('th', { scope: 'col' }, '申报网段'),
-              el('th', { scope: 'col' }, '操作'),
+              el('th', { scope: 'col' }, translateMessage("Requesting node")),
+              el('th', { scope: 'col' }, translateMessage("OS")),
+              el('th', { scope: 'col' }, translateMessage("Node public key")),
+              el('th', { scope: 'col' }, translateMessage("Transports and reports")),
+              el('th', { scope: 'col' }, translateMessage("Advertised subnets")),
+              el('th', { scope: 'col' }, translateMessage("Actions")),
             )),
             el('tbody', {}, rows),
           ),
@@ -432,10 +433,10 @@ export async function renderRequests(container, navTo) {
     }
     const maxPage = Math.max(1, Math.ceil((res.total || 0) / state.size));
     pagerMount.replaceChildren(
-      el('span', { class: 'muted' }, `共 ${res.total} 条记录 · 第 ${res.page} / ${maxPage} 页`),
+      el('span', { class: 'muted' }, translateMessage("{0} result(s) · Page {1} of {2}", res.total, res.page, maxPage)),
       el('div', { class: 'toolbar-row' },
-        el('button', { type: 'button', class: 'btn secondary sm', disabled: state.page <= 1, onClick: () => { state.page--; load(); } }, '上一页'),
-        el('button', { type: 'button', class: 'btn secondary sm', disabled: state.page >= maxPage, onClick: () => { state.page++; load(); } }, '下一页'),
+        el('button', { type: 'button', class: 'btn secondary sm', disabled: state.page <= 1, onClick: () => { state.page--; load(); } }, translateMessage("Previous")),
+        el('button', { type: 'button', class: 'btn secondary sm', disabled: state.page >= maxPage, onClick: () => { state.page++; load(); } }, translateMessage("Next")),
       ),
     );
   }
@@ -443,10 +444,10 @@ export async function renderRequests(container, navTo) {
   container.replaceChildren(
     el('div', { class: 'page-head' },
       el('div', {},
-        el('h1', {}, '入网申请审查'),
-        el('p', {}, '中心仅展示节点凭申请码提交的未验证申请。核对设备公钥后可将其加入策略草稿，交由所有者离线签发。'),
+        el('h1', {}, translateMessage("Review join requests")),
+        el('p', {}, translateMessage("The center lists unverified requests submitted with enrollment keys. Verify each public key before adding a node to a draft for the owner to sign.")),
       ),
-      el('button', { type: 'button', class: 'btn secondary btn-key icon-start', onClick: () => navTo('security') }, '管理入网申请码'),
+      el('button', { type: 'button', class: 'btn secondary btn-key icon-start', onClick: () => navTo('security') }, translateMessage("Manage enrollment keys")),
     ),
     el('section', { class: 'card form-stack' },
       el('div', { class: 'toolbar-row between' }, searchWidget),

@@ -1,3 +1,4 @@
+import { translateMessage } from './i18n.js';
 // Validate and project public artifacts before sending anything to the center.
 // These checks prevent accidental disclosure, not replace server-side validation.
 const hexKey = (s) => typeof s === 'string' && /^[0-9a-f]{64}$/.test(s);
@@ -30,7 +31,7 @@ const formats = {
 
 export async function readPublicArtifact(file, kind) {
   const { name, maxBytes, required, optional = {} } = formats[kind];
-  const invalid = () => new Error(`请选择格式正确的 ${name}；请勿选择私钥文件。文件未上传。`);
+  const invalid = () => new Error(translateMessage("Choose a valid {0}. Keep private key files local. The file has not been uploaded.", name));
   if (!file || file.size > maxBytes) throw invalid();
   let value;
   try {
@@ -52,7 +53,7 @@ export async function readPublicArtifact(file, kind) {
 export function parseACLSource(text) {
   const v = JSON.parse(text);
   if (!knownFields(v, ['acls', 'groups', 'hosts']) || !Array.isArray(v.acls)) {
-    throw new Error('请选择包含 acls 数组的 ACL JSON，不要选择私钥文件。');
+    throw new Error(translateMessage("Choose ACL JSON with an acls array. Keep private key files local."));
   }
   const stringList = (items) => items == null || (Array.isArray(items) && items.every((item) => typeof item === 'string'));
   const valueMap = (map, check) => map == null ||
@@ -61,7 +62,7 @@ export function parseACLSource(text) {
       (r.action == null || typeof r.action === 'string') && (r.proto == null || typeof r.proto === 'string') &&
       stringList(r.src) && stringList(r.dst)) ||
       !valueMap(v.groups, stringList) || !valueMap(v.hosts, (ip) => typeof ip === 'string')) {
-    throw new Error('ACL JSON 字段格式不正确，请检查规则、组及主机别名。');
+    throw new Error(translateMessage("Invalid ACL JSON fields. Check rules, groups, and host aliases."));
   }
   return v;
 }
@@ -70,7 +71,7 @@ export function parsePolicySource(text) {
   const v = JSON.parse(text);
   if (!knownFields(v, ['members', 'acl', 'dns', 'stunAddr', 'stunAltAddr']) || !Array.isArray(v.members) ||
       (Object.hasOwn(v, 'acl') && !knownFields(v.acl, ['acls', 'groups', 'hosts']))) {
-    throw new Error('请选择包含 members 的完整 policy.json，不要选择私钥文件。');
+    throw new Error(translateMessage("Choose a complete policy.json with members. Keep private key files local."));
   }
   return v;
 }
@@ -85,7 +86,7 @@ export function parseInventorySource(text) {
         (e.isLan == null || typeof e.isLan === 'boolean')))) ||
       (v.routes != null && (!Array.isArray(v.routes) || !v.routes.every((r) => typeof r === 'string'))) ||
       (v.note != null && typeof v.note !== 'string')) {
-    throw new Error('请选择包含 transports、endpoints、routes 或 note 的能力清单 JSON，不要选择私钥文件。');
+    throw new Error(translateMessage("Choose inventory JSON with transports, endpoints, routes, or note. Keep private key files local."));
   }
   return { transports: v.transports ?? [], endpoints: v.endpoints ?? [], routes: v.routes ?? [], note: v.note ?? '' };
 }

@@ -1,3 +1,5 @@
+import { language, translateMessage } from './i18n.js';
+import { translateCenterMessage } from './center_messages.js';
 // Shared API client, CSRF state, safe DOM builders, dropzone, copy command, dialog, and theme helpers.
 
 let csrfToken = '';
@@ -33,8 +35,8 @@ export async function api(path, { method = 'GET', body, headers = {} } = {}) {
     if (resp.status === 401 && path !== 'login' && onUnauthenticated) {
       onUnauthenticated();
     }
-    const msg = data?.error?.message || (typeof data === 'string' && data) || `请求失败 (HTTP ${resp.status})`;
-    const err = new Error(msg);
+    const msg = data?.error?.message || (typeof data === 'string' && data) || translateMessage("Request failed (HTTP {0})", resp.status);
+    const err = new Error(translateCenterMessage(msg));
     err.status = resp.status;
     err.code = data?.error?.code || '';
     throw err;
@@ -46,7 +48,7 @@ export async function downloadFile(path, fallbackName) {
   const resp = await fetch('/admin/api/' + path.replace(/^\/+/, ''), { credentials: 'same-origin' });
   if (!resp.ok) {
     const data = await resp.json().catch(() => null);
-    throw new Error(data?.error?.message || `导出失败 (HTTP ${resp.status})`);
+    throw new Error(translateCenterMessage(data?.error?.message) || translateMessage("Export failed (HTTP {0})", resp.status));
   }
   const blob = await resp.blob();
   const cd = resp.headers.get('content-disposition') || '';
@@ -156,7 +158,7 @@ export function createSearchInput({ placeholder, ariaLabel, delayMs = 180, onSea
   return searchBox(input);
 }
 
-export function terminalSnippet(commandText, label = '复制终端命令') {
+export function terminalSnippet(commandText, label = translateMessage("Copy terminal command")) {
   const cmdId = `term-${++copySeq}`;
   return el('div', { class: 'terminal-box' },
     el('div', { class: 'terminal-cmd' },
@@ -164,7 +166,7 @@ export function terminalSnippet(commandText, label = '复制终端命令') {
       el('code', { id: cmdId, dataset: { fullText: commandText } }, commandText),
     ),
     el('span', { class: 'copy' },
-      el('button', { type: 'button', class: 'copy-button icon-start', command: '--copy', commandfor: cmdId, 'aria-label': label }, '复制'),
+      el('button', { type: 'button', class: 'copy-button icon-start', command: '--copy', commandfor: cmdId, 'aria-label': label }, translateMessage("Copy")),
       el('span', { class: 'tip', role: 'status' }),
     ),
   );
@@ -172,7 +174,7 @@ export function terminalSnippet(commandText, label = '复制终端命令') {
 
 // Keeps full unbroken string in the DOM while visually keeping the trailing characters visible (single-line-overflow).
 let copySeq = 0;
-export function copyableCode(text, label = '复制内容', truncate = false) {
+export function copyableCode(text, label = translateMessage("Copy content"), truncate = false) {
   const str = String(text || '');
   const id = `cp-${++copySeq}`;
   let codeNode;
@@ -191,7 +193,7 @@ export function copyableCode(text, label = '复制内容', truncate = false) {
   return el('span', { class: 'code-pill' },
     codeNode,
     el('span', { class: 'copy' },
-      el('button', { type: 'button', class: 'copy-button icon-start', command: '--copy', commandfor: id, 'aria-label': label }, '复制'),
+      el('button', { type: 'button', class: 'copy-button icon-start', command: '--copy', commandfor: id, 'aria-label': label }, translateMessage("Copy")),
       el('span', { class: 'tip', role: 'status' }),
     ),
   );
@@ -204,8 +206,8 @@ export function bindDropzone(zone, input, titleEl, subEl, defaultTitle, defaultS
     const f = input.files?.[0];
     if (f) {
       zone.classList.add('has-file');
-      if (titleEl) titleEl.textContent = `已选择：${f.name}`;
-      if (subEl) subEl.textContent = `${fmtBytes(f.size)} · 点击或拖拽可重新选择文件`;
+      if (titleEl) titleEl.textContent = translateMessage("Selected: {0}", f.name);
+      if (subEl) subEl.textContent = translateMessage("{0} · Select or drop a different file", fmtBytes(f.size));
     } else {
       zone.classList.remove('has-file');
       if (titleEl) titleEl.textContent = defaultTitle;
@@ -235,19 +237,21 @@ export function fmtTime(iso) {
   if (!iso || iso.startsWith('0001-')) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString('zh-CN', { hour12: false });
+  return d.toLocaleString(language, { hour12: false });
 }
 
+const relativeTime = new Intl.RelativeTimeFormat(language);
+
 export function fmtRelative(iso) {
-  if (!iso || iso.startsWith('0001-')) return '从未上报';
+  if (!iso || iso.startsWith('0001-')) return translateMessage("Never reported");
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   const diffSec = Math.round((Date.now() - d.getTime()) / 1000);
-  if (diffSec < 5) return '刚刚';
-  if (diffSec < 60) return `${diffSec} 秒前`;
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
-  return `${Math.floor(diffSec / 86400)} 天前`;
+  if (diffSec < 5) return translateMessage("Just now");
+  if (diffSec < 60) return relativeTime.format(-diffSec, 'second');
+  if (diffSec < 3600) return relativeTime.format(-Math.floor(diffSec / 60), 'minute');
+  if (diffSec < 86400) return relativeTime.format(-Math.floor(diffSec / 3600), 'hour');
+  return relativeTime.format(-Math.floor(diffSec / 86400), 'day');
 }
 
 export function fmtBytes(n) {
@@ -290,10 +294,10 @@ export function closeModal() {
 }
 
 // Accessible confirmation modal focusing the safe Cancel control first (modern-web-guidance: dialog).
-export function confirmModal({ title, message, detail = '', confirmText = '确认执行', danger = true }) {
+export function confirmModal({ title, message, detail = '', confirmText = translateMessage("Confirm"), danger = true }) {
   return new Promise((resolve) => {
     const dlg = document.getElementById('modal-dialog');
-    const cancelBtn = el('button', { type: 'submit', value: 'cancel', class: 'btn secondary', autofocus: true }, '取消');
+    const cancelBtn = el('button', { type: 'submit', value: 'cancel', class: 'btn secondary', autofocus: true }, translateMessage("Cancel"));
     const okBtn = el('button', {
       type: 'submit',
       value: 'confirm',
@@ -412,7 +416,7 @@ async function performCopy(button, target) {
   clearTimeout(copyTimers.get(button));
   button.removeAttribute('data-copied');
   button.removeAttribute('data-failed');
-  let msg = ok ? '已复制' : '复制失败';
+  let msg = ok ? translateMessage("Copied") : translateMessage("Copy failed");
   if (msg === lastCopyAnnouncement) msg += '\u00A0';
   lastCopyAnnouncement = msg;
   if (tip) tip.textContent = '';

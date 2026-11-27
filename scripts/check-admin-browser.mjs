@@ -177,11 +177,33 @@ try {
     await waitFor('preview for the current file', () => js(ready));
   };
 
+  const selectLanguage = (selector, value) => js(`(() => {
+    const select = document.querySelector(${JSON.stringify(selector)});
+    select.value = ${JSON.stringify(value)};
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  const waitForLanguage = (lang, shell, content) => waitFor(`${lang} ${shell}`, () =>
+    js(`document.documentElement?.lang === ${JSON.stringify(lang)}
+      && document.querySelector(${JSON.stringify(shell)})?.hidden === false
+      && (${content})`).catch((err) => {
+      if (/context.*(destroyed|specified|found)/i.test(err.message)) return false;
+      throw err;
+    }));
+
   await cdp.send('Page.navigate', { url: `${adminURL}/admin/` });
-  await waitFor('login form', () => js(`document.querySelector('#auth-shell')?.hidden === false`));
+  await waitForLanguage('en', '#auth-shell', `document.querySelector('#login-title')?.textContent === 'Administrator sign-in'`);
+  await js(`document.querySelector('#current-password').value = 'incorrect-browser-test-password';
+    document.querySelector('#login-form').requestSubmit()`);
+  await waitFor('English sign-in error', () => js(`document.querySelector('#login-alert').textContent === 'Incorrect administrator password.'`));
+  await selectLanguage('#auth-language', 'zh-CN');
+  await waitForLanguage('zh-CN', '#auth-shell', `document.querySelector('#login-title')?.textContent === '管理员登录'`);
+  await cdp.send('Page.navigate', { url: `${adminURL}/admin/` });
+  await waitForLanguage('zh-CN', '#auth-shell', `!new URL(location.href).searchParams.has('lang')`);
   await js(`document.querySelector('#current-password').value = ${JSON.stringify(password)};
     document.querySelector('#login-form').requestSubmit()`);
-  await waitFor('owner setup', () => js(`document.querySelector('#setup-shell')?.hidden === false`));
+  await waitForLanguage('zh-CN', '#setup-shell', `document.querySelector('#setup-heading')?.textContent === '绑定所选的所有者客户端公钥'`);
+  await selectLanguage('#setup-language', 'en');
+  await waitForLanguage('en', '#setup-shell', `document.querySelector('#setup-heading')?.textContent === 'Bind the owner public key'`);
   await checkPicker({
     selector: '#trust-file-input', path: '/admin/api/setup/preview', validFile: trustPath,
     ready: `!document.querySelector('#setup-confirm-check').disabled`,
@@ -197,7 +219,7 @@ try {
     members: [], acl: { groups: { 'group:cycle': ['group:cycle'] }, acls: [{ src: ['group:cycle'], dst: ['*:443'] }] },
   } } });
   assert.equal(invalid.analysis.valid, false);
-  await view(`policy/${draft.draft.id}`, 'ACL 与策略');
+  await view(`policy/${draft.draft.id}`, 'ACL and policy drafts');
   const heading = (name) => `document.querySelector('.draft-layout section h2')?.textContent === ${JSON.stringify(name)}`;
   await waitFor('valid draft workspace', () => js(heading('Valid draft')));
   assert.equal(await js(`document.querySelectorAll('.draft-list button').length`), 2);
@@ -212,15 +234,15 @@ try {
   await cli(['owner', 'sign', '--dir', ownerDir, '--policy', policyPath, '--valid-for', '1h']);
   const authPath = join(ownerDir, 'authorization.json');
   const envelope = JSON.parse(await readFile(authPath, 'utf8'));
-  await view('publish', '签名授权发布');
-  const publishBtn = `[...document.querySelectorAll('#main-content button')].find(b => b.textContent.includes('确认验证并发布'))`;
+  await view('publish', 'Publish authorization');
+  const publishBtn = `[...document.querySelectorAll('#main-content button')].find(b => b.textContent.includes('Verify and publish'))`;
   await checkPicker({
     selector: '#auth-upload-input', path: '/admin/api/authorization/preview', validFile: authPath,
     ready: `(${publishBtn})?.disabled === false`,
     disabled: `(${publishBtn})?.disabled === true`,
   });
   await js(`(${publishBtn}).click()`);
-  await waitFor('signed publication', () => js(`document.querySelector('#main-content').textContent.includes('已持久化')`));
+  await waitFor('signed publication', () => js(`document.querySelector('#main-content').textContent.includes('Saved the signed authorization')`));
   const posted = uploads.filter(({ path }) => path.startsWith('/admin/api/authorization'));
   assert.equal(posted.length, 3, 'expected two valid previews and one signed publication');
   for (const req of posted) assert.deepEqual(JSON.parse(req.body), envelope, 'browser changed the signed envelope');
@@ -234,22 +256,22 @@ try {
   await noVersionLabel('#modal-dialog');
   await js(`document.querySelector('#modal-dialog').close()`);
 
-  await view('overview', '概览与实时协调状态');
+  await view('overview', 'Overview and coordination');
   await noVersionLabel('.topbar');
   await noVersionLabel('#main-content');
-  await view(`policy/${draft.draft.id}`, 'ACL 与策略');
-  await waitFor('stale draft warning', () => js(`document.querySelector('.draft-layout section')?.innerText.includes('生效策略已有更新')`));
+  await view(`policy/${draft.draft.id}`, 'ACL and policy drafts');
+  await waitFor('stale draft warning', () => js(`document.querySelector('.draft-layout section')?.innerText.includes('The active policy has changed')`));
   await noVersionLabel('#main-content');
 
   const cloned = await web('drafts', { method: 'POST', body: { name: 'Clone of active', fromActive: true } });
   assert.deepEqual(cloned.draft.policy.acl, acl);
-  await view(`policy/${cloned.draft.id}`, 'ACL 与策略');
+  await view(`policy/${cloned.draft.id}`, 'ACL and policy drafts');
   await waitFor('cloned draft workspace', () => js(heading('Clone of active')));
   const clonePath = `drafts/${cloned.draft.id}`;
   const openDraftDelete = async () => {
     assert.ok(await js(`(() => {
       const dlg = document.querySelector('#modal-dialog');
-      [...document.querySelectorAll('.draft-layout section button')].find(b => b.textContent === '删除草稿').click();
+      [...document.querySelectorAll('.draft-layout section button')].find(b => b.textContent === 'Delete draft').click();
       window.draftDeleteClosed = new Promise(resolve => dlg.addEventListener('close', () => resolve(true), { once: true }));
       return dlg.open && document.activeElement.value === 'cancel';
     })()`), 'draft deletion must open a dialog focused on Cancel');
@@ -272,7 +294,7 @@ try {
   await waitFor('confirmed deletion of the cloned draft', async () =>
     !(await web('drafts')).some((item) => item.id === cloned.draft.id));
   await web(`drafts/${draft.draft.id}`, { method: 'DELETE' });
-  await assert.rejects(web('drafts', { method: 'POST', body: { fromActive: true } }), /完整 policy\.json/);
+  await assert.rejects(web('drafts', { method: 'POST', body: { fromActive: true } }), /Import the complete policy\.json/);
 
   // Use a new unsigned draft to prove that rule editing/JSON import cannot change the active authorization.
   const activeBefore = await web('policy/active');
@@ -295,7 +317,7 @@ try {
   const visualPath = `drafts/${visual.draft.id}`;
   const visualRoute = `policy/${visual.draft.id}`;
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
-  await view(visualRoute, 'ACL 与策略');
+  await view(visualRoute, 'ACL and policy drafts');
 
   const one = (selector) => `document.querySelector(${JSON.stringify(selector)})`;
   const click = (selector) => js(`${one(selector)}.click()`);
@@ -311,22 +333,22 @@ try {
   const rows = '.acl-rule-table tbody tr';
   const modal = '#modal-dialog';
   const ruleForm = '.acl-rule-form';
-  const save = byText(editor, 'button', '校验并保存草稿');
+  const save = byText(editor, 'button', 'Validate and save draft');
   const chooseManual = (selector) => js(`(() => {
     const field = ${one(selector)};
     field.value = field.options[field.options.length - 1].value;
     field.dispatchEvent(new Event('change'));
   })()`);
   const waitClean = () => waitFor('ACL saved and reloaded', () => js(`!${one(editor)}?.hasAttribute('data-acl-dirty') && !!${one(editor)}`));
-  await waitFor('visual ACL default tab', () => js(`${one('.tablist [aria-selected=true]')}?.innerText === 'ACL 规则' && !!${one(rows)}`));
-  assert.match(await js(`${one(rows)}.innerText`), /2001:db8::443[\s\S]*全部端口/);
+  await waitFor('visual ACL default tab', () => js(`${one('.tablist [aria-selected=true]')}?.innerText === 'ACL rules' && !!${one(rows)}`));
+  assert.match(await js(`${one(rows)}.innerText`), /2001:db8::443[\s\S]*All ports/);
 
-  await click('button[aria-label="编辑第 1 条规则"]');
+  await click('button[aria-label="Edit rule 1"]');
   assert.equal(await js(`${one(modal)}.open && document.activeElement.name`), 'action');
   await click(`${ruleForm} input[value=drop]`);
   await js(`${one(ruleForm)}.requestSubmit()`);
   assert.equal(await js(`${one(modal)}.open`), false);
-  await clickText(editor, 'button', '添加规则');
+  await clickText(editor, 'button', 'Add rule');
   await click(`${ruleForm} input[value=accept]`);
   await enter('#acl-src-1-selector', 'node:19', 'change');
   await chooseManual('#acl-dst-1-selector');
@@ -335,7 +357,7 @@ try {
   await js(`${one(ruleForm)}.requestSubmit()`);
   assert.ok(await js(`${one(modal)}.open && ${one('#acl-dst-1-ports')}.getAttribute('aria-invalid') === 'true'`));
   await enter('#acl-dst-1-ports', '443, 8000-8010');
-  await clickText(ruleForm, 'button', '添加目标');
+  await clickText(ruleForm, 'button', 'Add Destination');
   await enter('#acl-dst-2-selector', 'office-lan', 'change');
   await enter('#acl-dst-2-ports', '*');
   await js(`${one(ruleForm)}.requestSubmit()`);
@@ -344,7 +366,7 @@ try {
 
   // Both the modern move and its fallback must retain row/control identity and keyboard focus.
   const move = (n, fallback) => js(`(() => {
-    const button = ${one(`button[aria-label="上移第 ${n} 条规则"]`)};
+    const button = ${one(`button[aria-label="Move up rule ${n}"]`)};
     const row = button.closest('tr');
     if (${fallback}) row.parentElement.moveBefore = undefined;
     button.focus();
@@ -353,14 +375,17 @@ try {
   })()`);
   assert.ok(await move(3, false), 'moving a rule lost focus or row identity');
   assert.ok(await move(2, true), 'the fallback move lost focus or row identity');
-  await click('button[aria-label="删除第 3 条规则"]');
+  await click('button[aria-label="Delete rule 3"]');
   assert.equal(await js(`document.querySelectorAll(${JSON.stringify(rows)}).length`), 2);
   assert.deepEqual((await web(visualPath)).draft.policy, visual.draft.policy, 'staged edits saved before confirmation');
-  await clickText('.tablist', 'button', '差异对比与导出');
-  assert.ok(await js(`${byText('#main-content', 'button', '导出待签 policy.json')}.disabled`));
-  await clickText('.tablist', 'button', 'ACL 规则');
+  await clickText('.tablist', 'button', 'Compare and export');
+  assert.ok(await js(`${byText('#main-content', 'button', 'Export policy.json for signing')}.disabled`));
+  await clickText('.tablist', 'button', 'ACL rules');
   await js(`window.confirmDraftOriginal = window.confirm; window.confirm = () => false; location.hash = '#overview';`);
   await waitFor('declined navigation preserves ACL', () => js(`location.hash === ${JSON.stringify(`#${visualRoute}`)}`));
+  await selectLanguage('#console-language', 'zh-CN');
+  assert.equal(await js(`document.documentElement.lang`), 'en');
+  assert.equal(await js(`document.querySelector('#console-language').value`), 'en');
   assert.ok(await js(`${one(editor)}.hasAttribute('data-acl-dirty')`));
   await js(`window.confirm = window.confirmDraftOriginal; delete window.confirmDraftOriginal;`);
   await js(`${save}.click()`);
@@ -379,7 +404,7 @@ try {
   assert.deepEqual(savedVisual.analysis.rules[0].dst, ['2001:db8:19::/64']);
   assert.deepEqual(await web('policy/active'), activeBefore);
 
-  await click('button[aria-label="编辑第 1 条规则"]');
+  await click('button[aria-label="Edit rule 1"]');
   await chooseManual('#acl-src-1-selector');
   await enter('#acl-src-1-selector-manual', 'untrusted-hostname');
   await js(`${one(ruleForm)}.requestSubmit()`);
@@ -388,7 +413,7 @@ try {
   assert.ok(await js(`${one(editor)}.hasAttribute('data-acl-dirty')`), 'a rejected save discarded local edits');
   assert.deepEqual((await web(visualPath)).draft.policy, expectedPolicy);
   await js(`window.confirmDraftOriginal = window.confirm; window.confirm = () => true;`);
-  await clickText(editor, 'button', '放弃改动');
+  await clickText(editor, 'button', 'Discard changes');
   await waitClean();
   await js(`window.confirm = window.confirmDraftOriginal; delete window.confirmDraftOriginal;`);
   assert.doesNotMatch(await js(`${one(rows)}.innerText`), /untrusted-hostname/);
@@ -404,7 +429,7 @@ try {
   await waitFor('private file rejected by ACL import', () => js(`${one('#draft-acl-file')}.getAttribute('aria-invalid') === 'true'`));
   assert.ok(await js(`${save}.disabled`));
   await selectFile('#draft-acl-file', importedPath);
-  const load = byText(advanced, 'button', '载入规则表');
+  const load = byText(advanced, 'button', 'Load rule table');
   await waitFor('JSON loaded in local editor', () => js(`!${load}.disabled`));
   await js(`${load}.click()`);
   await waitFor('loaded JSON rendered as editable rules', () => js(`${one(rows)}.innerText.includes('ICMP')`));
@@ -418,11 +443,17 @@ try {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await waitFor('compact ACL layout', () => js(`getComputedStyle(${one(rows)}).display === 'block' && innerWidth === 390`));
   assert.ok(await js('document.documentElement.scrollWidth <= innerWidth'), 'ACL overflows at mobile width');
-  await click('button[aria-label="编辑第 1 条规则"]');
+  await click('button[aria-label="Edit rule 1"]');
   assert.ok(await js(`${one(modal)}.open && ${one('#acl-dst-1-ports')}.disabled`), 'ICMP should not have an editable port');
-  await clickText(ruleForm, 'button', '取消');
+  await clickText(ruleForm, 'button', 'Cancel');
   assert.equal(await js(`${one(modal)}.open`), false);
-  console.log('Browser check passed: private files stayed local, stale previews were ignored, draft deletion required confirmation, and visual ACL edits stayed in the draft.');
+  await selectLanguage('#console-language', 'zh-CN');
+  await waitForLanguage('zh-CN', '#app-shell', `location.hash === ${JSON.stringify(`#${visualRoute}`)}
+    && document.querySelector('.tablist [aria-selected=true]')?.innerText === 'ACL 规则'`);
+  await waitFor('Chinese ACL layout', () => js(`getComputedStyle(${one('.acl-rule-table tbody tr td')}, '::before').content.includes('来源')`));
+  assert.ok(await js('document.documentElement.scrollWidth <= innerWidth'), 'Chinese ACL overflows at mobile width');
+  assert.deepEqual((await web(visualPath)).draft.policy, savedVisual.draft.policy);
+  console.log('Browser check passed: language and session persistence, signed publication, private file rejection, and mobile ACL editing.');
 } finally {
   if (cdp) {
     await Promise.race([cdp.send('Browser.close').catch(() => {}), delay(250)]);

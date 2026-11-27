@@ -1,3 +1,5 @@
+import { translateMessage } from './i18n.js';
+import { translateCenterMessage } from './center_messages.js';
 import {
   api, downloadFile, el, badge, callout, bindDropzone, copyableCode, terminalSnippet, fmtTime, toast, openModal, closeModal, confirmModal, buildTabs,
 } from './api.js';
@@ -6,25 +8,25 @@ import { parsePolicySource, readPublicArtifact } from './artifacts.js';
 
 function renderRuleTable(rules, captionText) {
   if (!rules || !rules.length) {
-    return el('div', { class: 'empty-state' }, '当前无编译过滤规则（默认零信任拒绝未显式放行的跨节点业务流量）。');
+    return el('div', { class: 'empty-state' }, translateMessage("No compiled rules. Traffic between nodes needs an explicit allow rule."));
   }
   return el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-label': captionText },
     el('table', { class: 'tbl-rules' },
       el('caption', {}, captionText),
       el('thead', {}, el('tr', {},
-        el('th', { scope: 'col' }, '动作'),
-        el('th', { scope: 'col' }, '协议'),
-        el('th', { scope: 'col' }, '来源前缀'),
-        el('th', { scope: 'col' }, '目标前缀'),
-        el('th', { scope: 'col' }, '目的业务端口'),
+        el('th', { scope: 'col' }, translateMessage("Action")),
+        el('th', { scope: 'col' }, translateMessage("Protocol")),
+        el('th', { scope: 'col' }, translateMessage("Source prefix")),
+        el('th', { scope: 'col' }, translateMessage("Destination prefix")),
+        el('th', { scope: 'col' }, translateMessage("Destination service port")),
       )),
       el('tbody', {}, rules.map((r) => el('tr', {},
-        el('th', { scope: 'row' }, badge(r.action === 'accept' ? '放行 · accept' : '丢弃 · drop', r.action === 'accept' ? 'ok' : 'err')),
+        el('th', { scope: 'row' }, badge(r.action === 'accept' ? translateMessage("Allow · accept") : translateMessage("Drop · drop"), r.action === 'accept' ? 'ok' : 'err')),
         el('td', {}, el('code', { class: 'chip' }, String(r.proto || '*').toUpperCase())),
-        el('td', {}, el('div', { class: 'chip-list' }, ...(r.src || []).slice(0, 6).map((s) => el('code', { class: 'chip' }, s)),
-          (r.src || []).length > 6 ? el('span', { class: 'muted' }, `+${r.src.length - 6} 项`) : null)),
-        el('td', {}, el('div', { class: 'chip-list' }, ...(r.dst || []).slice(0, 6).map((d) => el('code', { class: 'chip' }, d)),
-          (r.dst || []).length > 6 ? el('span', { class: 'muted' }, `+${r.dst.length - 6} 项`) : null)),
+        el('td', {}, el('div', { class: 'chip-list' }, ...(r.src || []).slice(0, 6).map((s) => el('code', { class: 'chip' }, translateCenterMessage(s))),
+          (r.src || []).length > 6 ? el('span', { class: 'muted' }, translateMessage("+{0} more", r.src.length - 6)) : null)),
+        el('td', {}, el('div', { class: 'chip-list' }, ...(r.dst || []).slice(0, 6).map((d) => el('code', { class: 'chip' }, translateCenterMessage(d))),
+          (r.dst || []).length > 6 ? el('span', { class: 'muted' }, translateMessage("+{0} more", r.dst.length - 6)) : null)),
         el('td', {}, el('code', { class: 'chip' }, r.ports || '*')),
       ))),
     ),
@@ -32,21 +34,21 @@ function renderRuleTable(rules, captionText) {
 }
 
 function renderDiffSummary(diff) {
-  if (!diff) return el('p', { class: 'muted' }, '暂无差异信息。');
+  if (!diff) return el('p', { class: 'muted' }, translateMessage("No comparison available."));
   const items = [];
   if (!diff.hasActive) {
-    items.push(callout('', `当前中心尚无生效快照；签发发布后将首次准入 ${diff.added?.length || 0} 台成员、下发 ${diff.rulesAfter || 0} 条底层包过滤规则。`));
+    items.push(callout('', translateMessage("The center has no active snapshot. Publication will authorize {0} member(s) and install {1} packet filter rule(s).", diff.added?.length || 0, diff.rulesAfter || 0)));
   } else {
     items.push(el('dl', { class: 'kv-grid' },
-      el('div', {}, el('dt', {}, '＋ 新增准入成员'), el('dd', {}, diff.added?.length ? diff.added.map((m) => `${m.name} (${m.ipv4})`).join('、') : '无')),
-      el('div', {}, el('dt', {}, '－ 移除（撤权）成员'), el('dd', {}, diff.removed?.length
-        ? badge(diff.removed.map((m) => m.name).join('、'), 'err') : '无')),
-      el('div', {}, el('dt', {}, '～ 属性变更成员'), el('dd', {}, diff.changed?.length
-        ? diff.changed.map((c) => `${c.member.name} [${c.fields.join('/')}]`).join('、') : '无')),
-      el('div', {}, el('dt', {}, '编译过滤规则变化'), el('dd', {}, diff.rulesSame
-        ? `无变化（${diff.rulesAfter} 条）` : `${diff.rulesBefore} 条 → ${diff.rulesAfter} 条`)),
-      el('div', {}, el('dt', {}, 'DNS / STUN 变更'), el('dd', {},
-        `${diff.dnsChanged ? 'DNS 已变更' : 'DNS 未变'} · ${diff.stunChanged ? 'STUN 已变更' : 'STUN 未变'}`)),
+      el('div', {}, el('dt', {}, translateMessage("＋ Added members")), el('dd', {}, diff.added?.length ? diff.added.map((m) => `${m.name} (${m.ipv4})`).join('、') : translateMessage("None"))),
+      el('div', {}, el('dt', {}, translateMessage("− Removed members")), el('dd', {}, diff.removed?.length
+        ? badge(diff.removed.map((m) => m.name).join('、'), 'err') : translateMessage("None"))),
+      el('div', {}, el('dt', {}, translateMessage("~ Changed members")), el('dd', {}, diff.changed?.length
+        ? diff.changed.map((c) => `${c.member.name} [${c.fields.map(translateCenterMessage).join('/')}]`).join(', ') : translateMessage("None"))),
+      el('div', {}, el('dt', {}, translateMessage("Compiled filter rules")), el('dd', {}, diff.rulesSame
+        ? translateMessage("Unchanged ({0} rule(s))", diff.rulesAfter) : translateMessage("{0} → {1} rule(s)", diff.rulesBefore, diff.rulesAfter))),
+      el('div', {}, el('dt', {}, translateMessage("DNS / STUN changes")), el('dd', {},
+        `${diff.dnsChanged ? translateMessage("DNS changed") : translateMessage("DNS unchanged")} · ${diff.stunChanged ? translateMessage("STUN changed") : translateMessage("STUN unchanged")}`)),
     ));
   }
   return el('div', { class: 'form-stack' }, ...items);
@@ -59,18 +61,18 @@ async function openEditDraftMemberModal(draft, member, onSaved) {
 
   const nameIn = el('input', { type: 'text', id: 'edit-mem-name', required: true, value: member.name || '' });
   const ip4In = el('input', { type: 'text', id: 'edit-mem-ip4', required: true, value: member.ipv4 || '' });
-  const ip6In = el('input', { type: 'text', id: 'edit-mem-ip6', placeholder: '可选，如 fd7a:115c:a1e0::11', value: member.ipv6 || '' });
+  const ip6In = el('input', { type: 'text', id: 'edit-mem-ip6', placeholder: translateMessage("Optional, such as fd7a:115c:a1e0::11"), value: member.ipv6 || '' });
   const tagsIn = el('input', {
-    type: 'text', id: 'edit-mem-tags', placeholder: '逗号分隔，如 tag:dev, tag:server',
+    type: 'text', id: 'edit-mem-tags', placeholder: translateMessage("Comma-separated tags, such as tag:dev, tag:server"),
     value: (member.tags || []).join(', '),
   });
   const routesIn = el('input', {
-    type: 'text', id: 'edit-mem-routes', placeholder: '逗号分隔 CIDR，如 192.168.10.0/24',
+    type: 'text', id: 'edit-mem-routes', placeholder: translateMessage("Comma-separated CIDRs, such as 192.168.10.0/24"),
     value: (member.routes || []).join(', '),
   });
   const extraChecks = reportedExtra.map((rt) => {
     const cb = el('input', { type: 'checkbox', value: rt });
-    return { cb, row: el('label', { class: 'checkbox-row' }, cb, el('code', {}, rt), el('span', { class: 'muted' }, '（节点最新自报）')) };
+    return { cb, row: el('label', { class: 'checkbox-row' }, cb, el('code', {}, rt), el('span', { class: 'muted' }, translateMessage(" (last node report)"))) };
   });
   const exitBtn = el('button', {
     type: 'button', class: 'preset-chip',
@@ -79,7 +81,7 @@ async function openEditDraftMemberModal(draft, member, onSaved) {
       if (!list.includes('0.0.0.0/0')) list.push('0.0.0.0/0');
       routesIn.value = list.join(', ');
     },
-  }, '＋ 填入全局出口 0.0.0.0/0');
+  }, translateMessage("＋ Add default exit route 0.0.0.0/0"));
   const errBox = el('div', { class: 'callout error icon-start', hidden: true });
 
   const form = el('form', {
@@ -89,13 +91,13 @@ async function openEditDraftMemberModal(draft, member, onSaved) {
       errBox.hidden = true;
       const name = nameIn.value.trim().toLowerCase();
       if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)) {
-        errBox.textContent = '唯一名称仅允许小写字母、数字和连字符，且不能以连字符开头或结尾。';
+        errBox.textContent = translateMessage("Use lowercase letters, digits, and hyphens. The name must start and end with a letter or digit.");
         errBox.hidden = false;
         return;
       }
       const tags = tagsIn.value.split(',').map((s) => s.trim()).filter(Boolean);
       if (tags.some((t) => !/^tag:[a-zA-Z0-9_-]+$/.test(t))) {
-        errBox.textContent = '所有标签必须以 tag: 开头（例如 tag:dev）。';
+        errBox.textContent = translateMessage("Start each tag with tag:, for example tag:dev.");
         errBox.hidden = false;
         return;
       }
@@ -106,7 +108,7 @@ async function openEditDraftMemberModal(draft, member, onSaved) {
       try {
         const nextPol = structuredClone(draft.policy);
         const idx = nextPol.members.findIndex((m) => m.nodeKey === member.nodeKey);
-        if (idx < 0) throw new Error('草稿中未找到该成员。');
+        if (idx < 0) throw new Error(translateMessage("This member was not found in the draft."));
         const updatedMember = {
           ...nextPol.members[idx],
           name,
@@ -120,7 +122,7 @@ async function openEditDraftMemberModal(draft, member, onSaved) {
         nextPol.members[idx] = updatedMember;
         await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: nextPol, requireValid: true } });
         closeModal();
-        toast(`已更新草稿成员 ${name}`);
+        toast(translateMessage("Updated draft member {0}", name));
         onSaved();
       } catch (err) {
         errBox.textContent = err.message;
@@ -129,47 +131,47 @@ async function openEditDraftMemberModal(draft, member, onSaved) {
     },
   },
     errBox,
-    el('div', { class: 'field' }, el('label', {}, `节点公钥（成员 #${member.id}）`), copyableCode(member.nodeKey, '复制成员公钥')),
+    el('div', { class: 'field' }, el('label', {}, translateMessage("Node public key (member #{0})", member.id)), copyableCode(member.nodeKey, translateMessage("Copy member public key"))),
     el('div', { class: 'form-row' },
-      el('div', { class: 'field' }, el('label', { for: 'edit-mem-name' }, '唯一 DNS 名称'), nameIn),
-      el('div', { class: 'field' }, el('label', { for: 'edit-mem-ip4' }, '虚拟 IPv4'), ip4In),
+      el('div', { class: 'field' }, el('label', { for: 'edit-mem-name' }, translateMessage("Unique DNS name")), nameIn),
+      el('div', { class: 'field' }, el('label', { for: 'edit-mem-ip4' }, translateMessage("Overlay IPv4")), ip4In),
     ),
-    el('div', { class: 'field' }, el('label', { for: 'edit-mem-ip6' }, '虚拟 IPv6（可选）'), ip6In),
-    el('div', { class: 'field' }, el('label', { for: 'edit-mem-tags' }, '授权标签 (ACL)'), tagsIn),
+    el('div', { class: 'field' }, el('label', { for: 'edit-mem-ip6' }, translateMessage("Overlay IPv6 (optional)")), ip6In),
+    el('div', { class: 'field' }, el('label', { for: 'edit-mem-tags' }, translateMessage("Authorized ACL tags")), tagsIn),
     extraChecks.length
-      ? el('div', { class: 'field' }, el('label', {}, '勾选并入节点自报的新网段'), ...extraChecks.map((x) => x.row))
+      ? el('div', { class: 'field' }, el('label', {}, translateMessage("Select newly advertised subnets to add")), ...extraChecks.map((x) => x.row))
       : null,
     el('div', { class: 'field' },
-      el('label', { for: 'edit-mem-routes' }, '已批准子网 / 出口路由'),
+      el('label', { for: 'edit-mem-routes' }, translateMessage("Approved subnets and exit routes")),
       routesIn,
       el('div', { class: 'preset-row' }, exitBtn),
     ),
     el('div', { class: 'form-actions' },
-      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, '取消'),
-      el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, '保存成员变更'),
+      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, translateMessage("Cancel")),
+      el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, translateMessage("Save member changes")),
     ),
   );
-  openModal(`编辑草稿成员 · ${member.name}`, form);
+  openModal(translateMessage("Edit draft member {0}", member.name), form);
 }
 
 function openDraftMetaModal({ mode, draft, onTriggerImport, onDone }) {
   const isCreate = mode === 'create';
   const nameIn = el('input', {
     type: 'text', id: 'draft-meta-name', maxlength: 64, required: true,
-    value: isCreate ? '策略变更草稿' : (draft?.name || ''),
-    placeholder: '例如：广州研发节点准入',
+    value: isCreate ? translateMessage("Policy draft") : (draft?.name || ''),
+    placeholder: translateMessage("For example, engineering node enrollment"),
     autofocus: true,
   });
   const noteIn = el('input', {
     type: 'text', id: 'draft-meta-note', maxlength: 240,
     value: isCreate ? '' : (draft?.note || ''),
-    placeholder: '可选备注：记录本次变更目的',
+    placeholder: translateMessage("Optional note about the change"),
   });
   const errBox = el('div', { class: 'callout error icon-start', hidden: true });
   const importFallbackBtn = el('button', {
     type: 'button', class: 'btn secondary sm btn-upload icon-start', hidden: true,
     onClick: () => { closeModal(); onTriggerImport?.(); },
-  }, '直接导入完整 policy.json');
+  }, translateMessage("Import complete policy.json"));
 
   const form = el('form', {
     class: 'form-stack',
@@ -184,7 +186,7 @@ function openDraftMetaModal({ mode, draft, onTriggerImport, onDone }) {
             body: { name: nameIn.value.trim(), note: noteIn.value.trim(), fromActive: true },
           });
           closeModal();
-          toast('已创建新策略草稿');
+          toast(translateMessage("Policy draft created"));
           onDone(created.draft.id);
         } else {
           await api(`drafts/${encodeURIComponent(draft.id)}`, {
@@ -192,7 +194,7 @@ function openDraftMetaModal({ mode, draft, onTriggerImport, onDone }) {
             body: { name: nameIn.value.trim(), note: noteIn.value.trim() },
           });
           closeModal();
-          toast('草稿名称与备注已更新');
+          toast(translateMessage("Draft metadata updated"));
           onDone(draft.id);
         }
       } catch (err) {
@@ -204,14 +206,14 @@ function openDraftMetaModal({ mode, draft, onTriggerImport, onDone }) {
   },
     errBox,
     importFallbackBtn,
-    el('div', { class: 'field' }, el('label', { for: 'draft-meta-name' }, '草稿名称'), nameIn),
-    el('div', { class: 'field' }, el('label', { for: 'draft-meta-note' }, '变更备注（可选）'), noteIn),
+    el('div', { class: 'field' }, el('label', { for: 'draft-meta-name' }, translateMessage("Draft name")), nameIn),
+    el('div', { class: 'field' }, el('label', { for: 'draft-meta-note' }, translateMessage("Change note (optional)")), noteIn),
     el('div', { class: 'form-actions' },
-      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, '取消'),
-      el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, isCreate ? '创建草稿' : '保存信息'),
+      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, translateMessage("Cancel")),
+      el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, isCreate ? translateMessage("Create draft") : translateMessage("Save details")),
     ),
   );
-  openModal(isCreate ? '新建策略草稿' : '编辑草稿名称与备注', form);
+  openModal(isCreate ? translateMessage("New policy draft") : translateMessage("Edit draft name and note"), form);
   requestAnimationFrame(() => nameIn.select());
 }
 
@@ -247,12 +249,12 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
         },
           el('div', { class: 'toolbar-row between' },
             el('strong', {}, d.name),
-            d.valid ? badge('有效', 'ok') : badge('待修正', 'err'),
+            d.valid ? badge(translateMessage("Valid"), 'ok') : badge(translateMessage("Needs attention"), 'err'),
           ),
-          el('span', { class: 'muted' }, `${d.members} 成员 · ${d.aclRules} 条 ACL`),
-          d.baseStale ? badge('需核对变更', 'warn') : null,
+          el('span', { class: 'muted' }, translateMessage("{0} member(s) · {1} ACL rule(s)", d.members, d.aclRules)),
+          d.baseStale ? badge(translateMessage("Review needed"), 'warn') : null,
         ))
-        : [el('div', { class: 'empty-state' }, '尚无草稿，请点击右上角新建或导入。')]),
+        : [el('div', { class: 'empty-state' }, translateMessage("Create or import a draft to get started."))]),
     );
     refreshGlobal();
   }
@@ -263,10 +265,10 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     if (!selectedId) {
       workspaceMount.replaceChildren(
         el('section', { class: 'card form-stack' },
-          el('h2', {}, '已发布的签名规则（只读）'),
+          el('h2', {}, translateMessage("Published signed rules (read only)")),
           activeData.hasActive
-            ? renderRuleTable(activeData.rules, '签名授权的包过滤规则')
-            : el('div', { class: 'empty-state' }, '当前尚未发布任何已签策略。请点击右上角「新建草稿」开始编排成员与 ACL。'),
+            ? renderRuleTable(activeData.rules, translateMessage("Signed packet filter rules"))
+            : el('div', { class: 'empty-state' }, translateMessage("No signed policy published. Create a draft to define members and ACLs.")),
         ),
       );
       return;
@@ -274,7 +276,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
 
     const id = selectedId;
     if (!data) {
-      workspaceMount.replaceChildren(el('p', { role: 'status', class: 'muted' }, '正在加载草稿工作台…'));
+      workspaceMount.replaceChildren(el('p', { role: 'status', class: 'muted' }, translateMessage("Loading the draft…")));
       try {
         data = await api(`drafts/${encodeURIComponent(id)}`);
       } catch (err) {
@@ -288,17 +290,17 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     let tabsRef = null;
 
     const issuesNodes = (analysis.issues || []).map(({ level, message }) => {
-      const isStaleWarn = level === 'warning' && analysis.baseStale;
-      const text = isStaleWarn
-        ? message.replace(/^草稿基于 v\d+，当前生效的是 v\d+。/, '草稿建立后，生效策略已有更新。')
-        : message;
+      const isStaleWarn = level === 'warning' && analysis.baseStale && message.startsWith('草稿基于 v');
       if (!isStaleWarn) {
-        return callout(level === 'error' ? 'error' : 'warn', `${level === 'error' ? '校验错误：' : '核对提示：'}${text}`);
+        const text = translateCenterMessage(message);
+        return level === 'error'
+          ? callout('error', translateMessage("Validation error: {0}", text))
+          : callout('warn', translateMessage("Review note: {0}", text));
       }
       return el('div', { class: 'callout warn icon-start toolbar-row between' },
-        el('span', {}, `核对提示：${text}`),
+        el('span', {}, translateMessage("The active policy has changed since this draft was created. Review the changes before exporting.")),
         el('div', { class: 'toolbar-row' },
-          el('button', { type: 'button', class: 'btn ghost sm', onClick: () => tabsRef?.select('diff', true) }, '查看差异'),
+          el('button', { type: 'button', class: 'btn ghost sm', onClick: () => tabsRef?.select('diff', true) }, translateMessage("View changes")),
           el('button', {
             type: 'button', class: 'btn secondary sm btn-check icon-start',
             onClick: async () => {
@@ -307,11 +309,11 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
                 method: 'PUT',
                 body: { name: draft.name, note: draft.note || '', rebase: true },
               });
-              toast('已确认对齐最新基准');
+              toast(translateMessage("Updated the draft's base version"));
               await reloadSidebar();
               if (seq === workspaceSeq) loadDraftWorkspace();
             },
-          }, '已核对，更新基准'),
+          }, translateMessage("Confirm review and update base")),
         ),
       );
     });
@@ -319,30 +321,30 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     // Members & DNS/STUN
     const dnsEnable = el('input', { type: 'checkbox', checked: !!pol.dns?.enableMagicDNS });
     const dnsSuffix = el('input', { type: 'text', value: pol.dns?.magicDNSSuffix || 'ack.internal', placeholder: 'ack.internal' });
-    const stun1 = el('input', { type: 'text', value: pol.stunAddr || '', placeholder: '字面量 IP:端口，如 203.0.113.10:3478' });
-    const stun2 = el('input', { type: 'text', value: pol.stunAltAddr || '', placeholder: '可选辅助 STUN IP:端口' });
+    const stun1 = el('input', { type: 'text', value: pol.stunAddr || '', placeholder: translateMessage("Literal IP and port, such as 203.0.113.10:3478") });
+    const stun2 = el('input', { type: 'text', value: pol.stunAltAddr || '', placeholder: translateMessage("Optional secondary STUN IP and port") });
 
     const membersTab = el('div', { class: 'form-stack' },
       el('div', { class: 'toolbar-row between' },
-        el('span', { class: 'muted' }, '可直接编辑草稿内成员的名称、标签和批准路由，或从「入网申请」添加新节点。'),
-        el('button', { type: 'button', class: 'btn secondary sm btn-plus icon-start', onClick: () => navTo('requests') }, '前往入网申请添加节点'),
+        el('span', { class: 'muted' }, translateMessage("Edit names, tags, and approved routes here. Use Join requests to add new nodes.")),
+        el('button', { type: 'button', class: 'btn secondary sm btn-plus icon-start', onClick: () => navTo('requests') }, translateMessage("Open join requests")),
       ),
       (pol.members || []).length
-        ? el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-label': '草稿成员列表' },
+        ? el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-label': translateMessage("Draft members") },
           el('table', { class: 'tbl-members' },
             el('thead', {}, el('tr', {},
               el('th', { scope: 'col' }, 'ID'),
-              el('th', { scope: 'col' }, '唯一名称'),
-              el('th', { scope: 'col' }, '虚拟地址'),
-              el('th', { scope: 'col' }, '节点公钥'),
-              el('th', { scope: 'col' }, '标签与批准路由'),
-              el('th', { scope: 'col' }, '操作'),
+              el('th', { scope: 'col' }, translateMessage("Unique name")),
+              el('th', { scope: 'col' }, translateMessage("Overlay addresses")),
+              el('th', { scope: 'col' }, translateMessage("Node public key")),
+              el('th', { scope: 'col' }, translateMessage("Tags and approved routes")),
+              el('th', { scope: 'col' }, translateMessage("Actions")),
             )),
             el('tbody', {}, pol.members.map((m) => el('tr', {},
               el('th', { scope: 'row', class: 'mono' }, `#${m.id}`),
               el('td', {}, el('code', {}, m.name)),
               el('td', {}, el('code', {}, m.ipv4), m.ipv6 ? el('div', {}, el('code', {}, m.ipv6)) : null),
-              el('td', {}, copyableCode(m.nodeKey, '复制成员公钥', true)),
+              el('td', {}, copyableCode(m.nodeKey, translateMessage("Copy member public key"), true)),
               el('td', {},
                 (m.tags || []).length || (m.routes || []).length
                   ? el('div', { class: 'chip-list' },
@@ -362,38 +364,38 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
                         if (seq === workspaceSeq) loadDraftWorkspace('members');
                       });
                     },
-                  }, '编辑'),
+                  }, translateMessage("Edit")),
                   el('button', {
                     type: 'button', class: 'btn danger sm btn-trash icon-start',
                     onClick: async () => {
                       if (!confirmDiscardACL(workspaceMount)) return;
                       const ok = await confirmModal({
-                        title: '从草稿移除成员',
-                        message: `确认从草稿「${draft.name}」中移除成员 ${m.name} (#${m.id}) 吗？`,
-                        detail: '此操作只修改当前草稿；签发并发布新授权后该节点才会失去组网权限。',
-                        confirmText: '确认移除',
+                        title: translateMessage("Remove member from draft"),
+                        message: translateMessage("Remove {1} (#{2}) from draft {0}?", draft.name, m.name, m.id),
+                        detail: translateMessage("This edits the draft. The node loses access when the owner signs and publishes the updated policy."),
+                        confirmText: translateMessage("Confirm removal"),
                       });
                       if (!ok) return;
                       await api(`drafts/${encodeURIComponent(draft.id)}/members/${encodeURIComponent(m.nodeKey)}`, { method: 'DELETE' });
-                      toast(`已从草稿移除成员 ${m.name}`);
+                      toast(translateMessage("Removed {0} from the draft", m.name));
                       reloadSidebar();
                       if (seq === workspaceSeq) loadDraftWorkspace('members');
                     },
-                  }, '移除'),
+                  }, translateMessage("Remove")),
                 ),
               ),
             ))),
           ),
         )
-        : el('div', { class: 'empty-state' }, '此草稿成员表为空。'),
+        : el('div', { class: 'empty-state' }, translateMessage("This draft has no members.")),
 
       el('div', { class: 'card form-stack' },
-        el('h3', {}, 'DNS 与签名 STUN 地址设置'),
-        el('label', { class: 'checkbox-row' }, dnsEnable, el('span', {}, '启用内嵌 MagicDNS (100.100.100.100)')),
+        el('h3', {}, translateMessage("DNS and signed STUN settings")),
+        el('label', { class: 'checkbox-row' }, dnsEnable, el('span', {}, translateMessage("Enable MagicDNS (100.100.100.100)"))),
         el('div', { class: 'form-row' },
-          el('div', { class: 'field' }, el('label', {}, 'MagicDNS 域名后缀'), dnsSuffix),
-          el('div', { class: 'field' }, el('label', {}, '主 STUN (字面量 IP:端口)'), stun1),
-          el('div', { class: 'field' }, el('label', {}, '辅助 STUN (字面量 IP:端口)'), stun2),
+          el('div', { class: 'field' }, el('label', {}, translateMessage("MagicDNS suffix")), dnsSuffix),
+          el('div', { class: 'field' }, el('label', {}, translateMessage("Primary STUN (literal IP:port)")), stun1),
+          el('div', { class: 'field' }, el('label', {}, translateMessage("Secondary STUN (literal IP:port)")), stun2),
         ),
         el('div', { class: 'form-actions' },
           el('button', {
@@ -405,28 +407,28 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               nextPol.stunAddr = stun1.value.trim();
               nextPol.stunAltAddr = stun2.value.trim();
               await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: nextPol } });
-              toast('DNS 与 STUN 设置已更新到草稿');
+              toast(translateMessage("DNS and STUN settings saved to draft"));
               reloadSidebar();
               if (seq === workspaceSeq) loadDraftWorkspace('members');
             },
-          }, '保存 DNS / STUN 到草稿'),
+          }, translateMessage("Save DNS / STUN to draft")),
         ),
       ),
     );
 
     const exportButtons = [];
-    const pendingNotice = el('p', { class: 'callout warn icon-start', hidden: true }, 'ACL 有未保存的改动。请返回「ACL 规则」保存后再对比和导出。');
+    const pendingNotice = el('p', { class: 'callout warn icon-start', hidden: true }, translateMessage("Save the unsaved changes in ACL rules before comparing or exporting the draft."));
     const diffPreview = el('div', { class: 'form-stack' },
       renderDiffSummary(analysis.diff),
-      renderRuleTable(analysis.rules, '待签发包过滤规则表'),
+      renderRuleTable(analysis.rules, translateMessage("Packet filter rules for signing")),
     );
     const aclTab = renderACLEditor(draft,
       analysis.valid
-        ? renderRuleTable(analysis.rules, `编译后的包过滤规则（${analysis.rules.length} 条）`)
-        : callout('warn', '草稿未通过校验，修正并保存后可查看编译结果。'),
+        ? renderRuleTable(analysis.rules, translateMessage("Compiled packet filter rules ({0})", analysis.rules.length))
+        : callout('warn', translateMessage("Fix the validation errors and save the draft to see compiled rules.")),
       (saved) => {
         if (seq !== workspaceSeq || !workspaceMount.isConnected) return;
-        toast('ACL 草稿已保存，当前授权未改变。');
+        toast(translateMessage("ACL draft saved. The active authorization is unchanged."));
         loadDraftWorkspace('acl', saved);
         reloadSidebar().catch((err) => toast(err.message));
       },
@@ -442,16 +444,16 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     const fullTab = el('div', { class: 'form-stack' },
       fullMsg,
       el('div', { class: 'field' },
-        el('label', {}, '完整 policy.json 内容（包含 members、acl、dns、stunAddr）'),
+        el('label', {}, translateMessage("Complete policy.json (members, acl, dns, and stunAddr)")),
         el('div', { class: 'editor-frame' },
           el('div', { class: 'editor-bar' },
             el('span', { class: 'mono' }, `${draft.id}-policy.json`),
             el('button', {
               type: 'button', class: 'btn ghost sm',
               onClick: () => {
-                try { fullEditor.value = JSON.stringify(JSON.parse(fullEditor.value), null, 2); } catch (e) { toast('JSON 语法有误：' + e.message); }
+                try { fullEditor.value = JSON.stringify(JSON.parse(fullEditor.value), null, 2); } catch (e) { toast(translateMessage("Invalid JSON syntax. ") + e.message); }
               },
-            }, '格式化 JSON'),
+            }, translateMessage("Format JSON")),
           ),
           fullEditor,
         ),
@@ -465,8 +467,8 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               const res = await api('policy/validate', { method: 'POST', body: { policy: candidate, baseVersion: draft.baseVersion } });
               fullMsg.className = `callout ${res.valid ? 'ok' : 'error'} icon-start`;
               fullMsg.textContent = res.valid
-                ? `预校验通过：将生成 ${res.rules?.length || 0} 条包过滤规则（提示数：${res.issues?.length || 0}）。`
-                : '预校验未通过：' + (res.issues?.find((issue) => issue.level === 'error')?.message || '存在错误');
+                ? translateMessage("Validation passed. The policy compiles to {0} packet filter rule(s) with {1} notice(s).", res.rules?.length || 0, res.issues?.length || 0)
+                : translateMessage("Validation failed. ") + (res.issues?.find((issue) => issue.level === 'error')?.message || translateMessage("Errors found"));
               fullMsg.hidden = false;
             } catch (err) {
               fullMsg.className = 'callout error icon-start';
@@ -474,7 +476,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               fullMsg.hidden = false;
             }
           },
-        }, '仅预校验 JSON'),
+        }, translateMessage("Validate JSON")),
         el('button', {
           type: 'button', class: 'btn primary btn-check icon-start',
           onClick: async () => {
@@ -482,7 +484,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               const candidate = parsePolicySource(fullEditor.value);
               if (!confirmDiscardACL(workspaceMount)) return;
               await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: { policy: candidate } });
-              toast('完整策略草稿已保存');
+              toast(translateMessage("Full policy draft saved"));
               reloadSidebar();
               if (seq === workspaceSeq) loadDraftWorkspace('json');
             } catch (err) {
@@ -491,7 +493,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               fullMsg.hidden = false;
             }
           },
-        }, '保存完整草稿'),
+        }, translateMessage("Save full draft")),
       ),
     );
 
@@ -500,7 +502,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
     const downloadDraft = async () => {
       try {
         await downloadFile(`drafts/${encodeURIComponent(draft.id)}/export`, `${draft.id}-policy.json`);
-        toast('已导出待签 policy.json');
+        toast(translateMessage("Exported policy.json for signing"));
       } catch (err) {
         toast(err.message);
       }
@@ -516,21 +518,21 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
       pendingNotice,
       diffPreview,
       el('div', { class: 'card form-stack' },
-        el('h3', {}, '导出待签文件并在所有者客户端离线签发'),
-        el('p', { class: 'muted' }, '网页与中心服务器均无私钥签名能力。请导出下方 JSON，在所有者电脑核对成员公钥与变更后执行签名命令，再前往「签名发布」上传生成的 authorization.json：'),
-        terminalSnippet(signCmd, '复制本地签名命令'),
+        el('h3', {}, translateMessage("Export the policy for offline signing")),
+        el('p', { class: 'muted' }, translateMessage("Export the JSON. Verify member public keys and changes on the owner computer, then run the signing command there. Upload the resulting authorization.json under Publish authorization.")),
+        terminalSnippet(signCmd, translateMessage("Copy local signing command")),
         el('div', { class: 'form-actions' },
-          exportButton('导出待签 policy.json'),
-          el('button', { type: 'button', class: 'btn secondary btn-upload icon-start', onClick: () => navTo('publish') }, '前往上传 authorization.json'),
+          exportButton(translateMessage("Export policy.json for signing")),
+          el('button', { type: 'button', class: 'btn secondary btn-upload icon-start', onClick: () => navTo('publish') }, translateMessage("Upload authorization.json")),
         ),
       ),
     );
 
-    tabsRef = buildTabs('策略草稿工作区', [
-      { id: 'acl', title: 'ACL 规则', content: aclTab },
-      { id: 'members', title: `成员与路由 (${pol.members?.length || 0})`, content: membersTab },
-      { id: 'diff', title: '差异对比与导出', content: diffTab },
-      { id: 'json', title: '完整策略 JSON', content: fullTab },
+    tabsRef = buildTabs(translateMessage("Policy draft workspace"), [
+      { id: 'acl', title: translateMessage("ACL rules"), content: aclTab },
+      { id: 'members', title: translateMessage("Members and routes ({0})", pol.members?.length || 0), content: membersTab },
+      { id: 'diff', title: translateMessage("Compare and export"), content: diffTab },
+      { id: 'json', title: translateMessage("Full policy JSON"), content: fullTab },
     ], initialTab);
 
     workspaceMount.replaceChildren(
@@ -539,11 +541,11 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
           el('div', {},
             el('div', { class: 'toolbar-row' },
               el('h2', {}, draft.name),
-              analysis.valid ? badge('校验通过', 'ok') : badge('存在错误', 'err'),
+              analysis.valid ? badge(translateMessage("Validation passed"), 'ok') : badge(translateMessage("Errors found"), 'err'),
             ),
             el('span', { class: 'muted' },
               draft.note ? `${draft.note} · ` : '',
-              `最后保存：${fmtTime(draft.updatedAt)}`,
+              translateMessage("Last saved {0}", fmtTime(draft.updatedAt)),
             ),
           ),
           el('div', { class: 'toolbar-row' },
@@ -560,26 +562,26 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
                   },
                 });
               },
-            }, '改名 / 备注'),
-            exportButton('导出 policy.json', 'sm'),
+            }, translateMessage("Rename or edit note")),
+            exportButton(translateMessage("Export policy.json"), 'sm'),
             el('button', {
               type: 'button', class: 'btn danger sm btn-trash icon-start',
               onClick: async () => {
                 if (!confirmDiscardACL(workspaceMount)) return;
                 const ok = await confirmModal({
-                  title: '删除策略草稿',
-                  message: `确认永久删除草稿「${draft.name}」吗？`,
-                  detail: '删除草稿不会影响线上已发布的授权快照，但草稿内未导出的修改将无法恢复。',
-                  confirmText: '确认删除草稿',
+                  title: translateMessage("Delete policy draft"),
+                  message: translateMessage("Delete draft {0} permanently?", draft.name),
+                  detail: translateMessage("Deletion discards unpublished draft changes. The published authorization stays active."),
+                  confirmText: translateMessage("Confirm draft deletion"),
                 });
                 if (!ok) return;
                 await api(`drafts/${encodeURIComponent(draft.id)}`, { method: 'DELETE' });
                 selectedId = '';
-                toast('草稿已删除');
+                toast(translateMessage("Draft deleted"));
                 await reloadSidebar();
                 loadDraftWorkspace();
               },
-            }, '删除草稿'),
+            }, translateMessage("Delete draft")),
           ),
         ),
         ...issuesNodes,
@@ -595,7 +597,7 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
       const f = importFullInput.files?.[0];
       if (!f) return;
       try {
-        if (f.size > 512 * 1024) throw new Error('策略文件过大（最多 512 KiB）。');
+        if (f.size > 512 * 1024) throw new Error(translateMessage("The policy file exceeds 512 KiB."));
         const policy = parsePolicySource(await f.text());
         if (importFullInput.files?.[0] !== f) return;
         const created = await api('drafts', {
@@ -603,11 +605,11 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
           body: { name: f.name.replace(/\.json$/i, ''), policy },
         });
         selectedId = created.draft.id;
-        toast('已导入完整 policy.json 为新草稿（尚未发布）');
+        toast(translateMessage("Imported policy.json as an unsigned draft"));
         await reloadSidebar();
         loadDraftWorkspace();
       } catch (err) {
-        if (importFullInput.files?.[0] === f) toast('导入失败：' + err.message);
+        if (importFullInput.files?.[0] === f) toast(translateMessage("Import failed. ") + err.message);
       } finally {
         if (importFullInput.files?.[0] === f) importFullInput.value = '';
       }
@@ -617,13 +619,13 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
   container.replaceChildren(
     el('div', { class: 'page-head' },
       el('div', {},
-        el('h1', {}, 'ACL 与策略草稿编排'),
-        el('p', {}, '在草稿中编辑访问规则和组网成员，核对差异后导出，交给所有者离线签发。'),
+        el('h1', {}, translateMessage("ACL and policy drafts")),
+        el('p', {}, translateMessage("Edit access rules and members in a draft, review the changes, and export it for the owner to sign offline.")),
       ),
       el('div', { class: 'toolbar-row' },
         importFullInput,
         el('button', { type: 'button', class: 'btn secondary btn-upload icon-start',
-          onClick: () => { if (confirmDiscardACL(workspaceMount)) importFullInput.click(); } }, '导入完整 policy.json'),
+          onClick: () => { if (confirmDiscardACL(workspaceMount)) importFullInput.click(); } }, translateMessage("Import full policy.json")),
         el('button', {
           type: 'button', class: 'btn primary btn-plus icon-start',
           onClick: () => {
@@ -638,12 +640,12 @@ export async function renderPolicy(container, navTo, refreshGlobal, initialDraft
               },
             });
           },
-        }, '新建草稿'),
+        }, translateMessage("New draft")),
       ),
     ),
     el('div', { class: 'draft-layout' },
       el('aside', { class: 'card form-stack' },
-        el('h2', {}, '策略草稿列表'),
+        el('h2', {}, translateMessage("Policy drafts")),
         draftSidebarMount,
       ),
       workspaceMount,
@@ -669,10 +671,10 @@ export async function renderPublish(container, navTo, refreshGlobal) {
       fileInput.disabled = true;
       try {
         const res = await api('authorization', { method: 'POST', body: stagedEnvelope });
-        toast(res.idempotent ? '这份授权已发布，无需重复提交。' : '签名授权已发布。');
+        toast(res.idempotent ? translateMessage("This authorization is already published.") : translateMessage("Signed authorization published."));
         stagedEnvelope = null;
         publishBtn.disabled = true;
-        previewMount.replaceChildren(callout('ok', '签名授权已持久化，在线节点将收到更新。'));
+        previewMount.replaceChildren(callout('ok', translateMessage("Saved the signed authorization. Online nodes will receive it.")));
         refreshGlobal();
         loadHistory();
       } catch (err) {
@@ -682,10 +684,10 @@ export async function renderPublish(container, navTo, refreshGlobal) {
         publishBtn.disabled = !stagedEnvelope;
       }
     },
-  }, '确认验证并发布到全网');
+  }, translateMessage("Verify and publish"));
 
-  const uploadTitle = '点击选择或拖拽已签 authorization.json 到此处';
-  const uploadHint = '中心校验签名、组网指纹和有效期，拒绝旧快照，原样保存签名文件。';
+  const uploadTitle = translateMessage("Select or drop signed authorization.json here");
+  const uploadHint = translateMessage("The center verifies the signature, fingerprint, and expiry, rejects older snapshots, and stores the signed file as received.");
   const dzTitle = el('span', { class: 'dropzone-title' }, uploadTitle);
   const dzSub = el('span', { class: 'dropzone-sub' }, uploadHint);
 
@@ -708,7 +710,7 @@ export async function renderPublish(container, navTo, refreshGlobal) {
         if (!prev.valid) {
           dropzone.classList.remove('has-file');
           previewMount.replaceChildren(
-            callout('error', el('strong', {}, '授权检查未通过：'), prev.reason || '未知错误'),
+            callout('error', el('strong', {}, translateMessage("Authorization check failed. ")), prev.reason || translateMessage("Unknown error")),
             ...(prev.authorization ? [renderDiffSummary(prev.diff)] : []),
           );
           return;
@@ -719,13 +721,13 @@ export async function renderPublish(container, navTo, refreshGlobal) {
         previewMount.replaceChildren(
           el('div', { class: 'preview-card form-stack' },
             el('div', { class: 'toolbar-row' },
-              badge('Ed25519 签名验证通过', 'ok'),
-              prev.idempotent ? badge('与已发布授权相同', 'neutral') : null,
+              badge(translateMessage("Ed25519 signature verified"), 'ok'),
+              prev.idempotent ? badge(translateMessage("Matches active authorization"), 'neutral') : null,
             ),
             el('dl', { class: 'kv-grid' },
-              el('div', {}, el('dt', {}, '快照摘要'), el('dd', {}, copyableCode(auth.digest, '复制快照摘要', true))),
-              el('div', {}, el('dt', {}, '到期时间'), el('dd', {}, fmtTime(auth.expiresAt))),
-              el('div', {}, el('dt', {}, '成员数 / 过滤规则数'), el('dd', {}, `${auth.members} 台成员 · ${auth.rules} 条规则`)),
+              el('div', {}, el('dt', {}, translateMessage("Snapshot digest")), el('dd', {}, copyableCode(auth.digest, translateMessage("Copy snapshot digest"), true))),
+              el('div', {}, el('dt', {}, translateMessage("Expires")), el('dd', {}, fmtTime(auth.expiresAt))),
+              el('div', {}, el('dt', {}, translateMessage("Members / filter rules")), el('dd', {}, translateMessage("{0} member(s) · {1} rule(s)", auth.members, auth.rules))),
             ),
             renderDiffSummary(prev.diff),
           ),
@@ -749,47 +751,47 @@ export async function renderPublish(container, navTo, refreshGlobal) {
 
   async function inspectPublication(version) {
     const detail = await api(`authorization/history/${version}`);
-    openModal('签名授权详情', el('div', { class: 'form-stack' },
-      callout('', '发布记录仅供核对，不能恢复旧的授权快照。'),
+    openModal(translateMessage("Signed authorization details"), el('div', { class: 'form-stack' },
+      callout('', translateMessage("Use publication history to review previous authorizations.")),
       el('dl', { class: 'kv-grid' },
-        el('div', {}, el('dt', {}, '摘要'), el('dd', {}, copyableCode(detail.digest, '复制历史摘要', true))),
-        el('div', {}, el('dt', {}, '发布时间'), el('dd', {}, fmtTime(detail.publishedAt))),
-        el('div', {}, el('dt', {}, '到期时间'), el('dd', {}, fmtTime(detail.expiresAt))),
+        el('div', {}, el('dt', {}, translateMessage("Digest")), el('dd', {}, copyableCode(detail.digest, translateMessage("Copy historical digest"), true))),
+        el('div', {}, el('dt', {}, translateMessage("Published")), el('dd', {}, fmtTime(detail.publishedAt))),
+        el('div', {}, el('dt', {}, translateMessage("Expires")), el('dd', {}, fmtTime(detail.expiresAt))),
       ),
-      renderRuleTable(detail.rules, `包过滤规则（${detail.rules?.length || 0} 条）`),
+      renderRuleTable(detail.rules, translateMessage("Packet filter rules ({0})", detail.rules?.length || 0)),
     ));
   }
 
   async function loadHistory() {
     const list = await api('authorization/history');
     if (!list.length) {
-      historyMount.replaceChildren(el('div', { class: 'empty-state' }, '尚无已发布的签名历史记录。'));
+      historyMount.replaceChildren(el('div', { class: 'empty-state' }, translateMessage("No signed publication history yet.")));
       return;
     }
     historyMount.replaceChildren(
       el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-labelledby': 'hist-cap' },
         el('table', { class: 'tbl-history' },
-          el('caption', { id: 'hist-cap' }, `签名授权记录（共 ${list.length} 条）`),
+          el('caption', { id: 'hist-cap' }, translateMessage("Signed authorizations ({0})", list.length)),
           el('thead', {}, el('tr', {},
-            el('th', { scope: 'col' }, '发布时间'),
-            el('th', { scope: 'col' }, '快照摘要'),
-            el('th', { scope: 'col' }, '成员 / 规则'),
-            el('th', { scope: 'col' }, '到期时间与状态'),
-            el('th', { scope: 'col' }, '操作'),
+            el('th', { scope: 'col' }, translateMessage("Published")),
+            el('th', { scope: 'col' }, translateMessage("Snapshot digest")),
+            el('th', { scope: 'col' }, translateMessage("Members / rules")),
+            el('th', { scope: 'col' }, translateMessage("Expiry and status")),
+            el('th', { scope: 'col' }, translateMessage("Actions")),
           )),
           el('tbody', {}, list.map((h) => el('tr', {},
             el('th', { scope: 'row' }, el('time', { datetime: h.publishedAt }, fmtTime(h.publishedAt))),
-            el('td', {}, copyableCode(h.digest, '复制摘要', true)),
-            el('td', {}, `${h.members} 成员 / ${h.rules} 规则`),
+            el('td', {}, copyableCode(h.digest, translateMessage("Copy digest"), true)),
+            el('td', {}, translateMessage("{0} member(s) / {1} rule(s)", h.members, h.rules)),
             el('td', {},
               el('time', { datetime: h.expiresAt }, fmtTime(h.expiresAt)), ' ',
-              h.expired ? badge('已过期', 'err') : h.active ? badge('当前生效', 'ok') : badge('历史记录', 'neutral'),
+              h.expired ? badge(translateMessage("Expired"), 'err') : h.active ? badge(translateMessage("Active"), 'ok') : badge(translateMessage("History"), 'neutral'),
             ),
             el('td', {}, el('button', {
               type: 'button', class: 'btn secondary sm',
-              'aria-label': `查看快照：${fmtTime(h.publishedAt)}发布`,
+              'aria-label': translateMessage("View snapshot published {0}", fmtTime(h.publishedAt)),
               onClick: () => inspectPublication(h.version),
-            }, '查看快照')),
+            }, translateMessage("View snapshot"))),
           ))),
         ),
       ),
@@ -799,15 +801,15 @@ export async function renderPublish(container, navTo, refreshGlobal) {
   container.replaceChildren(
     el('div', { class: 'page-head' },
       el('div', {},
-        el('h1', {}, '签名授权发布'),
-        el('p', {}, '上传所有者离线签发的 authorization.json，由中心验签并原样分发。'),
+        el('h1', {}, translateMessage("Publish authorization")),
+        el('p', {}, translateMessage("Upload authorization.json signed by the owner. The center verifies it and distributes it unchanged.")),
       ),
-      el('button', { type: 'button', class: 'btn secondary', onClick: () => navTo('policy') }, '返回策略草稿工作台'),
+      el('button', { type: 'button', class: 'btn secondary', onClick: () => navTo('policy') }, translateMessage("Back to policy drafts")),
     ),
     el('section', { class: 'card form-stack' },
-      el('h2', {}, '上传并验签 authorization.json'),
+      el('h2', {}, translateMessage("Upload and verify authorization.json")),
       el('div', { class: 'field' },
-        el('label', { for: 'auth-upload-input' }, '已签授权封套文件 authorization.json'),
+        el('label', { for: 'auth-upload-input' }, translateMessage("Signed authorization.json")),
         dropzone,
       ),
       uploadAlert,
@@ -815,7 +817,7 @@ export async function renderPublish(container, navTo, refreshGlobal) {
       el('div', { class: 'form-actions' }, publishBtn),
     ),
     el('section', { class: 'card form-stack' },
-      el('h2', {}, '发布记录'),
+      el('h2', {}, translateMessage("Publication history")),
       historyMount,
     ),
   );

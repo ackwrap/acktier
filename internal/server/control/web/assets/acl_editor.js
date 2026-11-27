@@ -1,3 +1,4 @@
+import { translateMessage } from './i18n.js';
 import { api, badge, el, makeDropzone, toast } from './api.js';
 import { aclSelectorOptions, openACLRuleForm } from './acl_rule_form.js';
 import { aclAction, aclProtocol, splitACLTarget, usesBusinessPorts } from './acl_values.js';
@@ -8,15 +9,15 @@ const maxACLBytes = 256 * 1024;
 export function confirmDiscardACL(scope) {
   const has = (selector) => scope.matches(selector) || scope.querySelector(selector);
   if (has('[data-acl-saving]')) {
-    toast('正在保存 ACL 草稿，请稍候。');
+    toast(translateMessage("Saving the ACL draft. Please wait."));
     return false;
   }
-  return !has('[data-acl-dirty]') || window.confirm('当前 ACL 有未保存的改动，要放弃这些改动吗？');
+  return !has('[data-acl-dirty]') || window.confirm(translateMessage("The ACL has unsaved changes. Discard them?"));
 }
 
 function selectorLabel(value, names) {
   const selector = value.trim();
-  if (selector === '*') return el('span', {}, '任意');
+  if (selector === '*') return el('span', {}, translateMessage("Any"));
   const name = names.get(selector);
   return el('span', { class: 'acl-selector-label' }, name, el('code', { class: 'chip' }, selector));
 }
@@ -34,22 +35,22 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
   const error = el('div', { id: 'acl-editor-error', class: 'callout error', role: 'alert', tabindex: '-1', hidden: true });
   const count = el('span', { class: 'acl-rule-count' });
   const tbody = el('tbody');
-  const table = el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-label': 'ACL 草稿规则表' },
+  const table = el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-label': translateMessage("ACL draft rules") },
     el('table', { class: 'acl-rule-table' },
-      el('thead', {}, el('tr', {}, ['规则', '来源', '目标 / 端口', '协议', '操作']
+      el('thead', {}, el('tr', {}, [translateMessage("Rule"), translateMessage("Source"), translateMessage("Destination / port"), translateMessage("Protocol"), translateMessage("Actions")]
         .map((label) => el('th', { scope: 'col' }, label)))),
       tbody,
     ));
   const empty = el('div', { class: 'empty-state' },
-    el('strong', {}, '还没有 ACL 规则'),
-    el('p', {}, '空 ACL 默认拒绝成员间的业务流量。点击「添加规则」开始。'));
+    el('strong', {}, translateMessage("No ACL rules yet")),
+    el('p', {}, translateMessage("An empty ACL denies traffic between members by default. Select Add rule to begin.")));
   const add = el('button', {
     type: 'button', class: 'btn primary btn-plus icon-start', onClick: () => editRow(),
-  }, '添加规则');
+  }, translateMessage("Add rule"));
   const save = el('button', {
     type: 'button', class: 'btn secondary btn-check icon-start', onClick: saveACL,
     'aria-describedby': 'acl-editor-error',
-  }, '校验并保存草稿');
+  }, translateMessage("Validate and save draft"));
   const discard = el('button', {
     type: 'button', class: 'btn ghost', onClick: () => {
       if (!confirmDiscardACL(root)) return;
@@ -59,7 +60,7 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
       replaceACL(saved);
       add.focus();
     },
-  }, '放弃改动');
+  }, translateMessage("Discard changes"));
   const json = el('textarea', {
     id: 'acl-source-editor', class: 'code-editor', spellcheck: 'false',
     'aria-describedby': 'acl-editor-error',
@@ -72,36 +73,36 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
   const loadJSON = el('button', { type: 'button', class: 'btn secondary', onClick: () => {
     try {
       const acl = parseACLSource(json.value);
-      replaceACL(acl, 'JSON 已载入规则表');
+      replaceACL(acl, translateMessage("JSON loaded into the rule table"));
       (save.disabled ? add : save).focus();
     } catch (err) {
       showError(err.message);
     }
-  } }, '载入规则表');
+  } }, translateMessage("Load rule table"));
   const resetJSON = el('button', { type: 'button', class: 'btn ghost', onClick: () => {
     error.hidden = true;
     json.value = appliedText;
     updateState();
     json.focus();
-  } }, '还原为规则表');
+  } }, translateMessage("Restore from rule table"));
   const root = el('div', { class: 'form-stack acl-editor' },
     el('div', { class: 'toolbar-row between acl-editor-head' },
-      el('div', {}, el('h3', { tabindex: '-1' }, '访问规则', count),
-        el('p', { class: 'field-hint' }, '从上到下匹配，首条命中即停止；未匹配的流量默认拒绝。')),
+      el('div', {}, el('h3', { tabindex: '-1' }, translateMessage("Access rules"), count),
+        el('p', { class: 'field-hint' }, translateMessage("Rules match from top to bottom. The first match applies. Unmatched traffic is denied."))),
       add,
     ),
     table, empty,
     el('div', { class: 'acl-savebar' },
-      el('div', {}, status, el('p', { class: 'field-hint' }, '只修改草稿；需所有者离线签发，再发布才生效。')),
+      el('div', {}, status, el('p', { class: 'field-hint' }, translateMessage("Edits affect the draft. The owner must sign and publish it to apply the rules."))),
       el('div', { class: 'form-actions' }, discard, save),
     ),
     error,
     el('details', { class: 'acl-details' },
-      el('summary', {}, '高级：导入或编辑 ACL JSON'),
+      el('summary', {}, translateMessage("Advanced ACL JSON")),
       el('div', { class: 'form-stack acl-details-body' },
-        el('p', { class: 'field-hint' }, '可在这里维护组与主机别名。导入会替换下方 JSON；载入规则表后再保存，不会修改成员、DNS、STUN 或路由。'),
-        el('div', { class: 'field' }, el('label', { for: file.id }, '导入 ACL JSON 文件（可选）'),
-          makeDropzone(file, '选择或拖入 ACL JSON', '文件先在本地读取，最多 256 KiB。')),
+        el('p', { class: 'field-hint' }, translateMessage("Use JSON to maintain groups and host aliases. Importing replaces the JSON below. Load the rule table before saving. Member, DNS, STUN, and route settings are preserved.")),
+        el('div', { class: 'field' }, el('label', { for: file.id }, translateMessage("Import ACL JSON (optional)")),
+          makeDropzone(file, translateMessage("Select or drop ACL JSON"), translateMessage("The browser reads files up to 256 KiB locally."))),
         el('div', { class: 'field' }, el('label', { for: json.id }, 'ACL JSON'),
           el('div', { class: 'editor-frame' },
             el('div', { class: 'editor-bar' }, el('span', { class: 'mono' }, 'acl.json'), el('span', {}, 'Groups · Hosts · Rules')),
@@ -110,7 +111,7 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
         el('div', { class: 'form-actions' }, loadJSON, resetJSON),
       ),
     ),
-    el('details', { class: 'acl-details' }, el('summary', {}, '查看已保存草稿的编译预览'),
+    el('details', { class: 'acl-details' }, el('summary', {}, translateMessage("Preview the compiled saved draft")),
       el('div', { class: 'acl-details-body' }, compiledPreview)),
   );
 
@@ -140,21 +141,21 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
     loadJSON.disabled = resetJSON.disabled = saving || reading || !jsonDirty;
     if (rowsChanged || editable !== rowsEditable) {
       rowsEditable = editable;
-      count.textContent = `${rows.length} 条`;
+      count.textContent = translateMessage("{0} rule(s)", rows.length);
       rows.forEach((r, i) => {
         r.order.textContent = String(i + 1);
         for (const [button, label, unavailable] of [
-          [r.edit, '编辑', false], [r.up, '上移', i === 0], [r.down, '下移', i === rows.length - 1], [r.remove, '删除', false],
+          [r.edit, translateMessage("Edit"), false], [r.up, translateMessage("Move up"), i === 0], [r.down, translateMessage("Move down"), i === rows.length - 1], [r.remove, translateMessage("Delete"), false],
         ]) {
-          button.setAttribute('aria-label', `${label}第 ${i + 1} 条规则`);
+          button.setAttribute('aria-label', translateMessage("{0} rule {1}", label, i + 1));
           lock(button, unavailable || !editable);
         }
       });
     }
     empty.hidden = rows.length > 0;
     table.hidden = rows.length === 0;
-    const state = saving ? '正在校验并保存…' : reading ? '正在读取 ACL 文件…' :
-      jsonDirty ? 'JSON 有未载入的改动。请先载入规则表或还原。' : changed ? '有未保存的改动' : '没有待保存的改动';
+    const state = saving ? translateMessage("Validating and saving…") : reading ? translateMessage("Reading ACL file…") :
+      jsonDirty ? translateMessage("The JSON has unapplied changes. Load the rule table or restore the previous JSON first.") : changed ? translateMessage("Unsaved changes") : translateMessage("No changes to save");
     const text = note ? `${note} · ${state}` : state;
     if (status.textContent !== text) status.textContent = text;
     onPendingChange(changed || jsonDirty || saving);
@@ -188,20 +189,20 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
     const action = aclAction(rawAction);
     const proto = aclProtocol(rawProto);
     const number = /^\d+$/.test(proto);
-    row.action.replaceChildren(action ? badge(action === 'accept' ? '放行' : '拒绝', action === 'accept' ? 'ok' : 'err') : badge('动作无效', 'err'));
+    row.action.replaceChildren(action ? badge(action === 'accept' ? translateMessage("Allow") : translateMessage("Deny"), action === 'accept' ? 'ok' : 'err') : badge(translateMessage("Invalid action"), 'err'));
     row.sources.replaceChildren(el('div', { class: 'acl-selector-list' },
-      Array.isArray(src) && src.length ? src.map((s) => typeof s === 'string' ? selectorLabel(s, selectors.names) : '无效来源') : '未设置'));
+      Array.isArray(src) && src.length ? src.map((s) => typeof s === 'string' ? selectorLabel(s, selectors.names) : translateMessage("Invalid source")) : translateMessage("Unset")));
     row.targets.replaceChildren(el('div', { class: 'acl-selector-list' },
       Array.isArray(dst) && dst.length ? dst.map((raw) => {
-        if (typeof raw !== 'string') return el('span', {}, '无效目标');
+        if (typeof raw !== 'string') return el('span', {}, translateMessage("Invalid destination"));
         const { selector, ports } = splitACLTarget(raw);
-        const portLabel = !usesBusinessPorts(proto) && proto ? '不匹配端口' :
-          ports === '*' ? '全部端口' : ['any', '0'].includes(proto) ? `${ports}（仅 TCP/UDP）` : ports;
+        const portLabel = !usesBusinessPorts(proto) && proto ? translateMessage("No port match") :
+          ports === '*' ? translateMessage("All ports") : ['any', '0'].includes(proto) ? translateMessage("{0} (TCP/UDP only)", ports) : ports;
         return el('div', { class: 'acl-target-label' }, selectorLabel(selector, selectors.names), el('span', { class: 'acl-port-label' }, portLabel));
-      }) : '未设置'));
+      }) : translateMessage("Unset")));
     row.protocol.replaceChildren(proto
-      ? el('code', { class: 'chip' }, number ? `IP ${proto}` : proto === 'any' ? '任意' : proto.toUpperCase())
-      : badge(`不支持：${rawProto}`, 'err'));
+      ? el('code', { class: 'chip' }, number ? `IP ${proto}` : proto === 'any' ? translateMessage("Any") : proto.toUpperCase())
+      : badge(translateMessage("Unsupported: {0}", rawProto), 'err'));
   }
 
   function makeRow(rule) {
@@ -210,15 +211,15 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
     const button = (text, onClick, label = text, move = false) => el('button', {
       type: 'button', class: `btn ghost sm${move ? ' acl-move-rule' : ''}`, title: label, onClick,
     }, text);
-    row.edit = button('编辑', () => editRow(row));
-    row.up = button('↑', () => moveRow(row, -1), '上移', true);
-    row.down = button('↓', () => moveRow(row, 1), '下移', true);
-    row.remove = button('删除', () => {
+    row.edit = button(translateMessage("Edit"), () => editRow(row));
+    row.up = button('↑', () => moveRow(row, -1), translateMessage("Move up"), true);
+    row.down = button('↓', () => moveRow(row, 1), translateMessage("Move down"), true);
+    row.remove = button(translateMessage("Delete"), () => {
       if (!canEdit()) return;
       const i = rows.indexOf(row);
       rows.splice(i, 1);
       row.node.remove();
-      rulesChanged(`已删除第 ${i + 1} 条规则`);
+      rulesChanged(translateMessage("Deleted rule {0}", i + 1));
       (rows[i]?.edit ?? rows.at(-1)?.edit ?? add).focus();
     });
     row.node = el('tr', {}, el('th', { scope: 'row' }, el('div', { class: 'acl-rule-heading' }, row.order, row.action)),
@@ -240,7 +241,7 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
         rows.push(added);
         tbody.append(added.node);
       }
-      rulesChanged(row ? '已应用规则修改' : '已添加规则');
+      rulesChanged(row ? translateMessage("Rule changes applied") : translateMessage("Rule added"));
     });
   }
 
@@ -259,7 +260,7 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
       tbody.insertBefore(row.node, before);
       if (row.node.contains(focused)) focused.focus({ preventScroll: true });
     }
-    rulesChanged(`规则已移到第 ${to + 1} 位`);
+    rulesChanged(translateMessage("Rule moved to position {0}", to + 1));
   }
 
   async function readFile() {
@@ -271,7 +272,7 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
     updateState();
     if (!selected) return;
     try {
-      if (selected.size > maxACLBytes) throw new Error('ACL 文件过大（最多 256 KiB）。');
+      if (selected.size > maxACLBytes) throw new Error(translateMessage("The ACL file exceeds 256 KiB."));
       const text = await selected.text();
       if (seq !== fileSeq || !root.isConnected) return;
       parseACLSource(text);
@@ -296,7 +297,7 @@ export function renderACLEditor(draft, compiledPreview, onSaved, onPendingChange
     let result;
     try {
       const size = new TextEncoder().encode(JSON.stringify(working)).length;
-      if (size > maxACLBytes) throw new Error('ACL 超过 256 KiB，请缩小后再保存。');
+      if (size > maxACLBytes) throw new Error(translateMessage("Reduce the ACL to 256 KiB or less before saving."));
       result = await api(`drafts/${encodeURIComponent(draft.id)}/acl`, { method: 'POST', body: working });
     } catch (err) {
       saving = false;

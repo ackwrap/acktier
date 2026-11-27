@@ -1,3 +1,4 @@
+import { translateMessage } from './i18n.js';
 import {
   api, el, badge, callout, createSearchInput, makeDropzone, copyableCode, fmtTime, fmtRelative, fmtPortsMap, toast, openModal, closeModal, confirmModal,
 } from './api.js';
@@ -9,8 +10,8 @@ async function openApproveRoutesModal(detail, navTo) {
   const unapproved = detail.flags?.unapprovedRoutes || [];
   const drafts = await api('drafts');
   const draftSelect = el('select', { id: 'route-draft-id' },
-    el('option', { value: '__new__' }, '＋ 新建一份基于当前生效快照的草稿'),
-    ...drafts.map((d) => el('option', { value: d.id }, `${d.name}（${d.members} 成员）`)),
+    el('option', { value: '__new__' }, translateMessage("＋ Create a draft from the active snapshot")),
+    ...drafts.map((d) => el('option', { value: d.id }, translateMessage("{0} ({1} member(s))", d.name, d.members))),
   );
   if (drafts.length > 0) draftSelect.value = drafts[0].id;
 
@@ -27,7 +28,7 @@ async function openApproveRoutesModal(detail, navTo) {
       errBox.hidden = true;
       const chosen = checks.filter((x) => x.cb.checked).map((x) => x.cb.value);
       if (!chosen.length) {
-        errBox.textContent = '请至少勾选一条要并入草稿的子网路由。';
+        errBox.textContent = translateMessage("Select at least one subnet route to add to the draft.");
         errBox.hidden = false;
         return;
       }
@@ -36,7 +37,7 @@ async function openApproveRoutesModal(detail, navTo) {
         if (draftId === '__new__') {
           const created = await api('drafts', {
             method: 'POST',
-            body: { name: `路由批准草稿 (${signed.name})`, fromActive: true },
+            body: { name: translateMessage("Route approval draft ({0})", signed.name), fromActive: true },
           });
           draftId = created.draft.id;
         }
@@ -60,7 +61,7 @@ async function openApproveRoutesModal(detail, navTo) {
           });
         }
         closeModal();
-        toast('已将所选路由并入策略草稿（需导出签发后生效）');
+        toast(translateMessage("Routes added to the draft. Export, sign, and publish to apply them."));
         navTo(`policy/${draftId}`);
       } catch (err) {
         errBox.textContent = err.message;
@@ -68,16 +69,16 @@ async function openApproveRoutesModal(detail, navTo) {
       }
     },
   },
-    callout('', '勾选要批准的申报网段并写入策略草稿；不会直接修改线上生效路由。'),
+    callout('', translateMessage("Select the advertised subnets to approve in the policy draft. Active routes change after signed publication.")),
     errBox,
-    el('div', { class: 'field' }, el('label', { for: 'route-draft-id' }, '目标策略草稿'), draftSelect),
-    el('div', { class: 'field' }, el('label', {}, `节点 ${signed.name} 新申报的未批准网段`), ...checks.map((x) => x.row)),
+    el('div', { class: 'field' }, el('label', { for: 'route-draft-id' }, translateMessage("Target policy draft")), draftSelect),
+    el('div', { class: 'field' }, el('label', {}, translateMessage("Unapproved subnets advertised by {0}", signed.name)), ...checks.map((x) => x.row)),
     el('div', { class: 'form-actions' },
-      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, '取消'),
-      el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, '写入策略草稿'),
+      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, translateMessage("Cancel")),
+      el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, translateMessage("Save to policy draft")),
     ),
   );
-  openModal(`并入草稿批准路由 · ${signed.name}`, form);
+  openModal(translateMessage("Draft route approval for {0}", signed.name), form);
 }
 
 function openInventoryModal(nodeKey, currentInv, onSaved) {
@@ -92,7 +93,7 @@ function openInventoryModal(nodeKey, currentInv, onSaved) {
       transports: [{ proto: 'udp', port: 51820 }, { proto: 'quic', port: 51821 }],
       endpoints: [{ proto: 'udp', addr: '203.0.113.15:51820' }],
       routes: ['192.168.10.0/24'],
-      note: '机房运维台账核对记录',
+      note: translateMessage("Datacenter inventory verification"),
     };
 
   const editor = el('textarea', {
@@ -103,7 +104,7 @@ function openInventoryModal(nodeKey, currentInv, onSaved) {
 
   const previewMount = el('div', { class: 'preview-card', hidden: true });
   const errBox = el('div', { id: 'inv-error', class: 'callout error icon-start', role: 'alert', hidden: true });
-  const saveBtn = el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, '保存人工核对清单');
+  const saveBtn = el('button', { type: 'submit', class: 'btn primary btn-check icon-start' }, translateMessage("Save imported inventory"));
   let parsedPayload = null;
 
   const invalidate = (message) => {
@@ -120,30 +121,30 @@ function openInventoryModal(nodeKey, currentInv, onSaved) {
       saveBtn.disabled = false;
       previewMount.hidden = false;
       previewMount.replaceChildren(
-        el('div', { class: 'preview-header' }, badge('待导入清单预览（仅供人工对照，不进入 NetMap）', 'accent')),
+        el('div', { class: 'preview-header' }, badge(translateMessage("Inventory preview (for review only)"), 'accent')),
         el('dl', { class: 'kv-grid' },
           el('div', {},
-            el('dt', {}, '监听传输端口'),
+            el('dt', {}, translateMessage("Transport listeners")),
             el('dd', {}, parsedPayload.transports.length
               ? parsedPayload.transports.map((t) => `${String(t.proto).toUpperCase()}:${t.port}`).join(', ')
-              : '未填写'),
+              : translateMessage("Not provided")),
           ),
           el('div', {},
-            el('dt', {}, '候选地址数'),
-            el('dd', {}, `${parsedPayload.endpoints.length} 条`),
+            el('dt', {}, translateMessage("Candidate addresses")),
+            el('dd', {}, translateMessage("{0} rule(s)", parsedPayload.endpoints.length)),
           ),
           el('div', {},
-            el('dt', {}, '申报网段'),
-            el('dd', {}, parsedPayload.routes.length ? parsedPayload.routes.join(', ') : '无'),
+            el('dt', {}, translateMessage("Advertised subnets")),
+            el('dd', {}, parsedPayload.routes.length ? parsedPayload.routes.join(', ') : translateMessage("None")),
           ),
           el('div', {},
-            el('dt', {}, '备注'),
+            el('dt', {}, translateMessage("Note")),
             el('dd', {}, parsedPayload.note || '—'),
           ),
         ),
       );
     } catch (e) {
-      invalidate('清单无效：' + e.message);
+      invalidate(translateMessage("Invalid inventory. ") + e.message);
     }
   };
 
@@ -158,7 +159,7 @@ function openInventoryModal(nodeKey, currentInv, onSaved) {
       editor.value = '';
       fileInput.removeAttribute('aria-invalid');
       try {
-        if (f.size > 64 * 1024) throw new Error('清单文件过大（最多 64 KiB）。');
+        if (f.size > 64 * 1024) throw new Error(translateMessage("The inventory file exceeds 64 KiB."));
         const text = await f.text();
         if (fileInput.files?.[0] !== f) return;
         parseAndPreview(text);
@@ -191,7 +192,7 @@ function openInventoryModal(nodeKey, currentInv, onSaved) {
           body: parsedPayload,
         });
         closeModal();
-        toast('节点人工能力清单已保存（仅用于核对，未改变 NetMap 或 ACL）');
+        toast(translateMessage("Node inventory saved for comparison. NetMap and ACL are unchanged."));
         onSaved();
       } catch (err) {
         errBox.textContent = err.message;
@@ -201,15 +202,15 @@ function openInventoryModal(nodeKey, currentInv, onSaved) {
     },
   },
     callout('',
-      '人工能力清单绑定到当前节点公钥，仅用于在节点详情页与节点自动上报对照，绝不会下发到节点 NetMap，也不会自动批准路由或放行 ACL。',
+      translateMessage("The imported inventory is tied to this node public key and appears alongside its reported capabilities. The center uses it for review only."),
     ),
     errBox,
     el('div', { class: 'field' },
-      el('label', { for: 'inv-file' }, '从运维清单 JSON 文件导入（可选）'),
-      makeDropzone(fileInput, '点击选择或拖拽能力清单 JSON', '上限 64 KiB · 支持 transports / endpoints / routes / note'),
+      el('label', { for: 'inv-file' }, translateMessage("Import inventory JSON (optional)")),
+      makeDropzone(fileInput, translateMessage("Select or drop inventory JSON"), translateMessage("Up to 64 KiB · transports, endpoints, routes, or note")),
     ),
     el('div', { class: 'field' },
-      el('label', { for: 'inv-json-editor' }, '能力清单 JSON 编辑'),
+      el('label', { for: 'inv-json-editor' }, translateMessage("Inventory JSON")),
       el('div', { class: 'editor-frame' },
         el('div', { class: 'editor-bar' }, el('span', { class: 'mono' }, 'inventory.json'), el('span', {}, 'Read-Only Comparison Metadata')),
         editor,
@@ -217,11 +218,11 @@ function openInventoryModal(nodeKey, currentInv, onSaved) {
     ),
     previewMount,
     el('div', { class: 'form-actions' },
-      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, '取消'),
+      el('button', { type: 'button', class: 'btn secondary', onClick: closeModal }, translateMessage("Cancel")),
       saveBtn,
     ),
   );
-  openModal('导入节点能力核对清单', form);
+  openModal(translateMessage("Import node capability inventory"), form);
 }
 
 async function renderNodeDetailCard(nodeKey, navTo, onRefresh) {
@@ -232,48 +233,48 @@ async function renderNodeDetailCard(nodeKey, navTo, onRefresh) {
   const inv = d.inventory;
 
   const statusBadges = [];
-  if (signed) statusBadges.push(badge(`已签成员 #${signed.id}`, 'ok'));
-  else statusBadges.push(badge('未签入当前成员表', 'warn'));
-  if (flags.authorizationExpired) statusBadges.push(badge('签名授权已过期', 'err'));
-  if (flags.revoked) statusBadges.push(badge('协调密钥已撤权', 'err'));
-  if (flags.missingReport) statusBadges.push(badge('缺少节点上报数据', 'warn'));
-  else if (rep?.online) statusBadges.push(badge('协调流：在线', 'ok'));
-  else statusBadges.push(badge('协调流：离线', 'neutral'));
-  if (inv) statusBadges.push(badge('含人工核对清单', 'accent'));
+  if (signed) statusBadges.push(badge(translateMessage("Signed member #{0}", signed.id), 'ok'));
+  else statusBadges.push(badge(translateMessage("Not in the active member list"), 'warn'));
+  if (flags.authorizationExpired) statusBadges.push(badge(translateMessage("Signed authorization expired"), 'err'));
+  if (flags.revoked) statusBadges.push(badge(translateMessage("Coordination key revoked"), 'err'));
+  if (flags.missingReport) statusBadges.push(badge(translateMessage("Node reports unavailable"), 'warn'));
+  else if (rep?.online) statusBadges.push(badge(translateMessage("Control stream online"), 'ok'));
+  else statusBadges.push(badge(translateMessage("Control stream offline"), 'neutral'));
+  if (inv) statusBadges.push(badge(translateMessage("Imported inventory available"), 'accent'));
 
   // Column 1: Owner-signed authoritative identity
   const signedCol = el('article', { class: 'card source-card signed form-stack' },
     el('div', { class: 'toolbar-row between' },
-      el('h3', {}, '1. 所有者已签身份（权威真值）'),
-      signed ? badge('已签生效', 'ok') : badge('无签名身份', 'warn'),
+      el('h3', {}, translateMessage("1. Owner-signed identity")),
+      signed ? badge(translateMessage("Signed and active"), 'ok') : badge(translateMessage("No signed identity"), 'warn'),
     ),
     signed
       ? el('dl', { class: 'kv-grid' },
-        el('div', {}, el('dt', {}, '唯一名称 / ID'), el('dd', {}, `${signed.name} (#${signed.id})`)),
-        el('div', {}, el('dt', {}, '虚拟 IPv4 / IPv6'), el('dd', {},
+        el('div', {}, el('dt', {}, translateMessage("Unique name / ID")), el('dd', {}, `${signed.name} (#${signed.id})`)),
+        el('div', {}, el('dt', {}, translateMessage("Overlay IPv4 / IPv6")), el('dd', {},
           el('code', {}, signed.ipv4),
           signed.ipv6 ? el('div', {}, el('code', {}, signed.ipv6)) : null,
         )),
-        el('div', {}, el('dt', {}, '授权标签 (ACL)'), el('dd', {},
+        el('div', {}, el('dt', {}, translateMessage("Authorized ACL tags")), el('dd', {},
           (signed.tags || []).length
             ? el('div', { class: 'chip-list' }, ...signed.tags.map((t) => el('code', { class: 'chip' }, t)))
-            : '无标签',
+            : translateMessage("No tags"),
         )),
-        el('div', {}, el('dt', {}, '已批准子网 / 出口路由'), el('dd', {},
+        el('div', {}, el('dt', {}, translateMessage("Approved subnets and exit routes")), el('dd', {},
           (signed.routes || []).length
             ? el('div', { class: 'chip-list' }, ...signed.routes.map((rt) => el('code', { class: 'chip' }, rt)))
-            : '无',
+            : translateMessage("None"),
         )),
       )
       : el('div', { class: 'form-stack' },
-        el('p', { class: 'muted' }, '当前生效快照中不包含该公钥，节点无法进入数据面通信。'),
+        el('p', { class: 'muted' }, translateMessage("This public key needs an active signed authorization before it can carry data-plane traffic.")),
         rep && !flags.revoked
           ? el('button', {
             type: 'button', class: 'btn primary sm btn-plus icon-start',
             onClick: () => openAddMemberModal({
               nodeKey: d.nodeKey, hostname: rep.hostname, advertisedRoutes: rep.advertisedRoutes,
             }, navTo),
-          }, '核对并加入策略草稿')
+          }, translateMessage("Verify and add to policy draft"))
           : null,
       ),
   );
@@ -282,78 +283,78 @@ async function renderNodeDetailCard(nodeKey, navTo, onRefresh) {
   const repPorts = fmtPortsMap(rep?.transportPorts);
   const reportedCol = el('article', { class: 'card source-card reported form-stack' },
     el('div', { class: 'toolbar-row between' },
-      el('h3', {}, '2. 节点自动上报（连接提示）'),
-      rep ? badge(`心跳：${fmtRelative(rep.lastSeen)}`, rep.online ? 'ok' : 'neutral') : badge('从未上报', 'warn'),
+      el('h3', {}, translateMessage("2. Node-reported connection hints")),
+      rep ? badge(translateMessage("Heartbeat {0}", fmtRelative(rep.lastSeen)), rep.online ? 'ok' : 'neutral') : badge(translateMessage("Never reported"), 'warn'),
     ),
     rep
       ? el('dl', { class: 'kv-grid' },
-        el('div', {}, el('dt', {}, '自报主机名 / 系统'), el('dd', {}, `${rep.hostname || '未填写'} (${rep.os || '—'})`)),
-        el('div', {}, el('dt', {}, '本地传输监听端口'), el('dd', {},
+        el('div', {}, el('dt', {}, translateMessage("Reported hostname / OS")), el('dd', {}, `${rep.hostname || translateMessage("Not provided")} (${rep.os || '—'})`)),
+        el('div', {}, el('dt', {}, translateMessage("Local transport listeners")), el('dd', {},
           repPorts
             ? el('div', { class: 'chip-list' }, ...repPorts.map((p) => el('code', { class: 'chip' }, p)))
-            : badge('未上报（未启用直连监听）', 'neutral'),
+            : badge(translateMessage("No direct listeners reported"), 'neutral'),
         )),
-        el('div', {}, el('dt', {}, '对外候选地址 (IP:端口)'), el('dd', {},
+        el('div', {}, el('dt', {}, translateMessage("External candidates (IP:port)")), el('dd', {},
           (rep.endpoints || []).length
             ? el('div', { class: 'chip-list' }, ...rep.endpoints.map((ep) => el('code', { class: 'chip' },
               `${ep.addr}/${String(ep.proto).toUpperCase()}${ep.isLan ? ' · LAN' : ''}`)))
-            : '无候选地址',
+            : translateMessage("No candidate addresses"),
         )),
-        el('div', {}, el('dt', {}, '节点申报路由'), el('dd', {},
+        el('div', {}, el('dt', {}, translateMessage("Node-advertised routes")), el('dd', {},
           (rep.advertisedRoutes || []).length
             ? el('div', { class: 'chip-list' }, ...rep.advertisedRoutes.map((rt) => el('code', { class: 'chip' }, rt)))
-            : '无申报路由',
+            : translateMessage("No advertised routes"),
         )),
-        el('div', {}, el('dt', {}, '对等跳板中继能力'), el('dd', {}, rep.canRelay ? '支持作为跳板 (CanRelay)' : '普通终端节点')),
+        el('div', {}, el('dt', {}, translateMessage("Peer relay capability")), el('dd', {}, rep.canRelay ? translateMessage("Can act as a peer relay (CanRelay)") : translateMessage("Endpoint node"))),
       )
-      : el('p', { class: 'muted' }, '该公钥已在快照中签发，但尚未向中心注册或发送心跳。'),
+      : el('p', { class: 'muted' }, translateMessage("This key is signed, but the node has yet to register or send a heartbeat.")),
   );
 
   // Column 3: Operator-imported manual inventory (comparison only)
   const invCol = el('article', { class: 'card source-card inventory form-stack' },
     el('div', { class: 'toolbar-row between' },
-      el('h3', {}, '3. 人工导入能力清单（仅供核对）'),
-      inv ? badge(`更新于 ${fmtTime(inv.importedAt)}`, 'accent') : badge('未登记', 'neutral'),
+      el('h3', {}, translateMessage("3. Imported inventory for comparison")),
+      inv ? badge(translateMessage("Updated {0}", fmtTime(inv.importedAt)), 'accent') : badge(translateMessage("No inventory"), 'neutral'),
     ),
     inv
       ? el('dl', { class: 'kv-grid' },
-        el('div', {}, el('dt', {}, '登记监听传输'), el('dd', {},
+        el('div', {}, el('dt', {}, translateMessage("Recorded transport listeners")), el('dd', {},
           (inv.transports || []).length
             ? el('div', { class: 'chip-list' }, ...inv.transports.map((t) => el('code', { class: 'chip' }, `${String(t.proto).toUpperCase()}:${t.port}`)))
             : '—',
         )),
-        el('div', {}, el('dt', {}, '登记候选地址'), el('dd', {},
+        el('div', {}, el('dt', {}, translateMessage("Recorded candidate addresses")), el('dd', {},
           (inv.endpoints || []).length
             ? el('div', { class: 'chip-list' }, ...inv.endpoints.map((ep) => el('code', { class: 'chip' }, `${ep.addr}/${String(ep.proto).toUpperCase()}`)))
             : '—',
         )),
-        el('div', {}, el('dt', {}, '登记网段'), el('dd', {},
+        el('div', {}, el('dt', {}, translateMessage("Recorded subnets")), el('dd', {},
           (inv.routes || []).length
             ? el('div', { class: 'chip-list' }, ...inv.routes.map((rt) => el('code', { class: 'chip' }, rt)))
             : '—',
         )),
-        el('div', {}, el('dt', {}, '核对备注'), el('dd', {}, inv.note || '—')),
+        el('div', {}, el('dt', {}, translateMessage("Verification note")), el('dd', {}, inv.note || '—')),
       )
-      : el('p', { class: 'muted' }, '尚未上传人工核对清单。可导入运维台账中的预期监听端口、公网 IP 与子网，在此与自动上报逐项比对。'),
+      : el('p', { class: 'muted' }, translateMessage("No inventory uploaded. Import expected listeners, public IPs, and subnets to compare with the node's reports.")),
     el('div', { class: 'toolbar-row' },
       el('button', { type: 'button', class: 'btn secondary sm btn-upload icon-start', onClick: () => openInventoryModal(d.nodeKey, inv, onRefresh) },
-        inv ? '更新能力清单' : '上传能力清单'),
+        inv ? translateMessage("Update inventory") : translateMessage("Upload inventory")),
       inv
         ? el('button', {
           type: 'button', class: 'btn danger sm btn-trash icon-start',
           onClick: async () => {
             const ok = await confirmModal({
-              title: '清除人工能力清单',
-              message: `确认移除节点 ${signed?.name || rep?.hostname || ''} 的人工导入能力清单吗？`,
-              detail: '这不会影响节点的线上授权或自动上报数据。',
-              confirmText: '确认清除',
+              title: translateMessage("Remove imported inventory"),
+              message: translateMessage("Remove imported inventory for {0}?", signed?.name || rep?.hostname || ''),
+              detail: translateMessage("The node keeps its active authorization and reports."),
+              confirmText: translateMessage("Confirm removal"),
             });
             if (!ok) return;
             await api(`nodes/${encodeURIComponent(d.nodeKey)}/inventory`, { method: 'DELETE' });
-            toast('人工能力清单已移除');
+            toast(translateMessage("Imported inventory removed"));
             onRefresh();
           },
-        }, '清除清单')
+        }, translateMessage("Clear inventory"))
         : null,
     ),
   );
@@ -361,35 +362,35 @@ async function renderNodeDetailCard(nodeKey, navTo, onRefresh) {
   const mismatchAlerts = [];
   if ((flags.unapprovedRoutes || []).length) {
     mismatchAlerts.push(el('div', { class: 'callout warn icon-start toolbar-row between' },
-      el('span', {}, `节点自报了尚未获所有者签发批准的网段：${flags.unapprovedRoutes.join('、')}（未签发前不会进入转发平面）。`),
+      el('span', {}, translateMessage("The node advertised unapproved subnets {0}. They require a signed authorization before forwarding.", flags.unapprovedRoutes.join('、'))),
       signed
         ? el('button', {
           type: 'button', class: 'btn secondary sm btn-plus icon-start',
           onClick: () => openApproveRoutesModal(d, navTo),
-        }, '并入草稿批准路由')
+        }, translateMessage("Add routes to draft"))
         : null,
     ));
   }
   if ((flags.unadvertisedRoutes || []).length) {
     mismatchAlerts.push(callout('warn',
-      `已签快照批准了网段 ${flags.unadvertisedRoutes.join('、')}，但节点当前心跳未申报该网段。`));
+      translateMessage("The active snapshot approves subnet {0}, but the node did not advertise it in its latest heartbeat.", flags.unadvertisedRoutes.join('、'))));
   }
 
   return el('section', { class: 'card form-stack' },
     el('div', { class: 'toolbar-row between' },
       el('div', { class: 'form-stack' },
         el('div', { class: 'toolbar-row' },
-          el('h2', {}, `节点三方对照详情：${signed?.name || rep?.hostname || '未知节点'}`),
+          el('h2', {}, translateMessage("Node details for {0}", signed?.name || rep?.hostname || translateMessage("Unknown node"))),
           ...statusBadges,
         ),
-        copyableCode(d.nodeKey, '复制完整节点公钥'),
+        copyableCode(d.nodeKey, translateMessage("Copy full node public key")),
       ),
-      el('button', { type: 'button', class: 'btn secondary sm btn-close icon-start', onClick: () => navTo('nodes') }, '关闭详情'),
+      el('button', { type: 'button', class: 'btn secondary sm btn-close icon-start', onClick: () => navTo('nodes') }, translateMessage("Close details")),
     ),
     ...mismatchAlerts,
     el('div', { class: 'three-col' }, signedCol, reportedCol, invCol),
     el('p', { class: 'field-hint' },
-      '说明：传输监听端口（UDP/TCP/QUIC/WSS）仅代表底层加密隧道可达性；业务流量访问权限（如 TCP 8443）仅由已签 ACL 策略决定，绝不从传输端口自动放行。'),
+      translateMessage("UDP, TCP, QUIC, and WSS listeners show how the encrypted tunnel can be reached. Access to a service such as TCP 8443 requires a separate signed ACL rule.")),
   );
 }
 
@@ -402,16 +403,16 @@ export async function renderNodes(container, navTo, selectedKey = '') {
   const pagerMount = el('div', { class: 'toolbar-row between' });
 
   const searchWidget = createSearchInput({
-    placeholder: '搜索已签名称、自报主机名、虚拟 IP 或节点公钥…',
-    ariaLabel: '搜索节点',
+    placeholder: translateMessage("Search by signed name, reported hostname, overlay IP, or public key…"),
+    ariaLabel: translateMessage("Search nodes"),
     onSearch: (q) => { state.q = q; state.page = 1; loadList(); },
   });
 
   const filterDefs = [
-    ['', '全部设备'],
-    ['member', '已签成员'],
-    ['request', '待审申请'],
-    ['revoked', '已撤权'],
+    ['', translateMessage("All nodes")],
+    ['member', translateMessage("Signed members")],
+    ['request', translateMessage("Pending requests")],
+    ['revoked', translateMessage("Revoked")],
   ];
   const segBtns = filterDefs.map(([val, label]) => el('button', {
     type: 'button',
@@ -426,7 +427,7 @@ export async function renderNodes(container, navTo, selectedKey = '') {
       loadList();
     },
   }, label));
-  const segmentedBar = el('div', { class: 'segmented', role: 'group', 'aria-label': '按角色状态筛选节点' }, ...segBtns);
+  const segmentedBar = el('div', { class: 'segmented', role: 'group', 'aria-label': translateMessage("Filter by node status") }, ...segBtns);
 
   async function loadDetail() {
     if (!state.detailKey) {
@@ -446,38 +447,38 @@ export async function renderNodes(container, navTo, selectedKey = '') {
     const res = await api(`nodes?${qs}`);
     const items = res.items || [];
     if (!items.length) {
-      tableMount.replaceChildren(el('div', { class: 'empty-state' }, '暂无符合筛选条件的设备或密钥记录。'));
+      tableMount.replaceChildren(el('div', { class: 'empty-state' }, translateMessage("No nodes or keys match these filters.")));
     } else {
       const rows = items.map((n) => {
         const ports = fmtPortsMap(n.transportPorts);
         const roleBadge = n.status === 'member'
-          ? badge(`已签 #${n.memberId}`, 'ok')
-          : n.status === 'revoked' ? badge('已撤权', 'err') : badge('待签申请', 'warn');
+          ? badge(translateMessage("Signed #{0}", n.memberId), 'ok')
+          : n.status === 'revoked' ? badge(translateMessage("Revoked"), 'err') : badge(translateMessage("Awaiting approval"), 'warn');
         const connBadge = !n.reported
-          ? badge('缺少上报', 'warn')
-          : n.online ? badge('在线', 'ok') : badge('离线', 'neutral');
+          ? badge(translateMessage("No report"), 'warn')
+          : n.online ? badge(translateMessage("Online"), 'ok') : badge(translateMessage("Offline"), 'neutral');
         const dotKind = !n.reported ? 'warn' : n.online ? 'online' : '';
 
         return el('tr', {},
           el('th', { scope: 'row' },
             el('div', { class: 'node-title' },
               el('span', { class: `status-dot ${dotKind}` }),
-              n.name || n.hostname || '未命名节点',
+              n.name || n.hostname || translateMessage("Unnamed node"),
             ),
             el('div', { class: 'muted' },
-              n.os ? `${n.os}` : '系统未知',
-              n.name && n.hostname && n.name !== n.hostname ? ` · 自报 ${n.hostname}` : '',
+              n.os ? `${n.os}` : translateMessage("Unknown OS"),
+              n.name && n.hostname && n.name !== n.hostname ? translateMessage(" · reported as {0}", n.hostname) : '',
             ),
           ),
-          el('td', {}, el('div', { class: 'toolbar-row' }, roleBadge, connBadge, n.inventory ? badge('人工清单', 'accent') : null)),
-          el('td', {}, n.ipv4 ? copyableCode(n.ipv4, '复制虚拟 IPv4') : '—'),
-          el('td', {}, copyableCode(n.nodeKey, '复制节点公钥', true)),
+          el('td', {}, el('div', { class: 'toolbar-row' }, roleBadge, connBadge, n.inventory ? badge(translateMessage("Imported inventory"), 'accent') : null)),
+          el('td', {}, n.ipv4 ? copyableCode(n.ipv4, translateMessage("Copy overlay IPv4")) : '—'),
+          el('td', {}, copyableCode(n.nodeKey, translateMessage("Copy node public key"), true)),
           el('td', {},
             ports
               ? el('div', { class: 'chip-list' }, ...ports.map((p) => el('code', { class: 'chip' }, p)))
-              : badge('未上报', 'neutral'),
+              : badge(translateMessage("Not reported"), 'neutral'),
           ),
-          el('td', {}, n.reported ? fmtRelative(n.lastSeen) : '从未连接'),
+          el('td', {}, n.reported ? fmtRelative(n.lastSeen) : translateMessage("Never connected")),
           el('td', {},
             el('div', { class: 'toolbar-row' },
               n.status === 'request'
@@ -486,12 +487,12 @@ export async function renderNodes(container, navTo, selectedKey = '') {
                   onClick: () => openAddMemberModal({
                     nodeKey: n.nodeKey, hostname: n.hostname, advertisedRoutes: n.advertisedRoutes,
                   }, navTo),
-                }, '加入草稿')
+                }, translateMessage("Add to draft"))
                 : null,
               el('button', {
                 type: 'button', class: 'btn secondary sm',
                 onClick: () => navTo(`nodes/${encodeURIComponent(n.nodeKey)}`),
-              }, '三方对照'),
+              }, translateMessage("Compare details")),
             ),
           ),
         );
@@ -499,15 +500,15 @@ export async function renderNodes(container, navTo, selectedKey = '') {
       tableMount.replaceChildren(
         el('div', { class: 'table-wrapper', tabindex: '0', role: 'region', 'aria-labelledby': 'nodes-cap' },
           el('table', { class: 'tbl-nodes' },
-            el('caption', { id: 'nodes-cap' }, `节点与能力台账（共 ${res.total} 条）`),
+            el('caption', { id: 'nodes-cap' }, translateMessage("Node and capability inventory ({0})", res.total)),
             el('thead', {}, el('tr', {},
-              el('th', { scope: 'col' }, '设备名称'),
-              el('th', { scope: 'col' }, '身份与协调状态'),
-              el('th', { scope: 'col' }, '已签虚拟地址'),
-              el('th', { scope: 'col' }, '节点公钥'),
-              el('th', { scope: 'col' }, '传输监听端口'),
-              el('th', { scope: 'col' }, '最近心跳'),
-              el('th', { scope: 'col' }, '操作'),
+              el('th', { scope: 'col' }, translateMessage("Node name")),
+              el('th', { scope: 'col' }, translateMessage("Identity and coordination")),
+              el('th', { scope: 'col' }, translateMessage("Signed overlay addresses")),
+              el('th', { scope: 'col' }, translateMessage("Node public key")),
+              el('th', { scope: 'col' }, translateMessage("Transport listeners")),
+              el('th', { scope: 'col' }, translateMessage("Last heartbeat")),
+              el('th', { scope: 'col' }, translateMessage("Actions")),
             )),
             el('tbody', {}, rows),
           ),
@@ -516,10 +517,10 @@ export async function renderNodes(container, navTo, selectedKey = '') {
     }
     const maxPage = Math.max(1, Math.ceil((res.total || 0) / state.size));
     pagerMount.replaceChildren(
-      el('span', { class: 'muted' }, `共 ${res.total} 条 · 第 ${res.page} / ${maxPage} 页`),
+      el('span', { class: 'muted' }, translateMessage("{0} total · Page {1} of {2}", res.total, res.page, maxPage)),
       el('div', { class: 'toolbar-row' },
-        el('button', { type: 'button', class: 'btn secondary sm', disabled: state.page <= 1, onClick: () => { state.page--; loadList(); } }, '上一页'),
-        el('button', { type: 'button', class: 'btn secondary sm', disabled: state.page >= maxPage, onClick: () => { state.page++; loadList(); } }, '下一页'),
+        el('button', { type: 'button', class: 'btn secondary sm', disabled: state.page <= 1, onClick: () => { state.page--; loadList(); } }, translateMessage("Previous")),
+        el('button', { type: 'button', class: 'btn secondary sm', disabled: state.page >= maxPage, onClick: () => { state.page++; loadList(); } }, translateMessage("Next")),
       ),
     );
   }
@@ -527,8 +528,8 @@ export async function renderNodes(container, navTo, selectedKey = '') {
   container.replaceChildren(
     el('div', { class: 'page-head' },
       el('div', {},
-        el('h1', {}, '节点详情与能力库存对照'),
-        el('p', {}, '在同一视图严格并排核对「所有者已签身份」「节点自动上报提示」与「运维人工导入清单」。'),
+        el('h1', {}, translateMessage("Nodes and capabilities")),
+        el('p', {}, translateMessage("Compare owner-signed identity, node-reported connection hints, and imported inventory side by side.")),
       ),
     ),
     detailMount,

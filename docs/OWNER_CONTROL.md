@@ -1,69 +1,69 @@
-# 所有者客户端与中心协调架构
+# Owner and center architecture
 
-**状态：第一版已实现。** 中心首次启动进入 Web 初始化模式；选定组网所有者、绑定公钥后才开放入网。所有者可以是用户平时用的电脑，不需要额外服务器，也不用常在线。
+The first owner-signed implementation is available. A new center opens the Web setup screen and accepts enrollments after you choose an owner and bind its public key. The owner can use a regular computer and only needs to be online when signing or administering the network.
 
-## 信任边界
+## Trust boundaries
 
-| 角色 | 职责 | 不允许做的事 |
+| Role | Responsibilities | Trust boundary |
 | --- | --- | --- |
-| 所有者客户端 | 本地保管 Ed25519 私钥，核对设备公钥，签发身份、地址、ACL、DNS、子网和出口授权 | 不把私钥上传中心，不提供由中心或网页触发的签名服务 |
-| 中心协调端 | 接收申请、维护节点连接提示、验证并分发已签快照、提供 STUN 和中继 | 不授予组网身份、不能单独换钥、放宽 ACL 或批准路由 |
-| 节点 | 预置所有者公钥，本地验签、拒绝回滚、按已签策略收发流量 | 不以中心管理员令牌、`PreAuthKey` 或 TLS 证书代替所有者授权 |
+| Owner client | Keeps the local Ed25519 private key, verifies node public keys, and signs node identity, address, ACL, DNS, subnet, and exit authorization | The private key stays on the owner computer. Signing is local. |
+| Center | Receives requests, maintains connection hints, verifies and distributes signed snapshots, and provides STUN and relaying | Membership, key rotations, ACL grants, and routes require the owner's signature. |
+| Node | Pins the owner public key, verifies signatures, rejects rollback, and handles traffic using signed policy | Center admin tokens, `PreAuthKey`, and TLS certificates provide separate transport or enrollment credentials. |
 
-中心自带 **`/admin/`** 管理台，支持首次绑定所有者、创建或吊销入网申请码、查看申请和成员、上传已签授权。网页不能签名，也不能直接访问私钥。
+The built-in **`/admin/`** console binds the owner, creates or revokes enrollment keys, displays join requests and members, and uploads signed authorizations. Signing happens on the owner computer.
 
-## 首次安装与加入
+## Initial setup and enrollment
 
-### 1. 启动中心，在 Web 绑定所有者
+### 1. Start the center and bind an owner
 
-本机验证可直接启动，无需预先指定公钥：
+For a loopback test, start the center without an existing owner binding.
 
 ```bash
 acktier-server -listen 127.0.0.1:8080 -admin-listen 127.0.0.1:8081 -stun= -stun-alt=
 ```
 
-打开 [http://127.0.0.1:8081/admin/](http://127.0.0.1:8081/admin/)，用中心独立的 Web 管理员密码登录。首次自动生成的密码写入私有文件 `./data/server-credentials.json` 的 `adminPassword`，数据库只保存 Argon2id 哈希。忘记密码时，**先停止中心**，在本机以相同的 `-data` 参数执行 `acktier-server reset-password`，再启动；运行中的 SQLite 库会拒绝离线重置。Web 管理台与管理 API 默认只在 `-admin-listen`（回环）监听，普通节点端口 `-listen` 不暴露 `/admin/` 或管理路由；远程访问管理台建议经 SSH 隧道，或显式为 `-admin-listen` 配置 HTTPS。
+Open [http://127.0.0.1:8081/admin/](http://127.0.0.1:8081/admin/) and sign in with the dedicated Web administrator password. The generated initial password is stored as `adminPassword` in the private `./data/server-credentials.json` file. The database stores an Argon2id hash. To recover access, **stop the center**, run `acktier-server reset-password` locally with the same `-data`, then restart. A running center holds an exclusive SQLite lock. The console and management API use the separate `-admin-listen` listener, which defaults to loopback. Use an SSH tunnel or explicitly configure an HTTPS management listener for remote access.
 
-在选定的客户端电脑执行：
+On the selected owner computer, initialize its key.
 
 ```bash
 acktier owner init --dir ./data/owner
 ```
 
-- `trust.json`：所有者公钥和最低可接受授权版本。通过可信渠道交给中心和其他节点，不能让节点仅凭中心提供的文件建立信任。
-- `signer.json`：私钥种子和最后签发版本。**留在这台电脑，不要上传或把整个目录复制给中心**。应备份到加密离线介质，保护签名目录的写入权限。
-- 所有者的签名密钥和节点的 `NodeKey` 是不同密钥。所有者电脑如需加入数据面，仍需把它自己的 `NodeKey` 放入签名名单。
+- `trust.json` holds the owner public key and the minimum acceptable authorization version. Deliver it to the center and nodes over a trusted channel independent of the center.
+- `signer.json` holds the private seed and latest signed version. **Keep it on the owner computer.** Back it up to encrypted offline media and protect the signing directory from unauthorized writes.
+- The owner's signing key and a node's `NodeKey` have separate roles. If the owner computer also joins the data plane, include its own `NodeKey` in the signed member list.
 
-在初始化页选择这台客户端的 `trust.json`，核对来源并点击「绑定所有者」。绑定前管理台正常运行，节点注册、心跳、流和中心中继暂停。绑定写入中心状态文件后，无需重启，网页也不能重新选择所有者。自动化安装仍可用 `-owner-trust ./trust.json` 直接配置。
+In setup, select `trust.json`, verify its provenance and fingerprint, and choose **Bind owner**. The console is available before binding. Node registration, heartbeats, control streams, and center relay open after the binding has persisted. The Web console can bind the owner once. For automated setups, use `-owner-trust ./trust.json`.
 
-正式部署应保留 `-data` 状态路径。用 `-data=` 会让绑定、公钥和申请随进程结束丢失，下次启动需要重新初始化。
+Keep a persistent `-data` path in production. Running with `-data=` uses memory storage and requires fresh initialization on each start.
 
-### 2. 节点提交申请
+### 2. Submit a join request
 
-节点应独立取得 `trust.json`，与所有者核对公钥。在节点本机生成或查看它自己的公钥：
+Obtain `trust.json` independently and verify the public key with the owner. Generate or display the node key on the node.
 
 ```bash
 acktier owner node-key --state ./data/nas.json
 ```
 
-用同一个状态文件启动守护进程并提交申请：
+Start the daemon with that same state file and submit a request.
 
 ```bash
 acktierd -state ./data/nas.json -owner-trust ./trust.json -tun memory -upnp=false -lan-discovery=false
 acktier up --server http://127.0.0.1:8080 --auth-key "<PRE_AUTH_KEY>" --hostname nas
 ```
 
-入网申请码可在管理台生成；它只允许向中心提交申请，不允许加入数据面。未批准时，`up` 会提示等待所有者。节点只保存供下次注册复用的协调令牌，不安装 TUN 地址、对端密钥、ACL 或路由。
+Create an enrollment key in the console. It permits submitting a join request. Until approval, `up` reports that the owner must approve the request. The node saves its coordination token for its next registration. The TUN address, peer keys, ACL, and routes are installed only once signed approval is available.
 
-### 3. 所有者检查、签发，中心分发
+### 3. Review, sign, and distribute authorization
 
-在管理台的「入网申请」查看节点公钥、传输能力与申报路由，核对后可一键加入「ACL 与策略草稿」并导出完整 `policy.json`。如显式开启控制端 API 委托（在所有者电脑执行 `acktier owner controller-init --dir ./data/owner` 并在管理台「申请码与安全」上传 `controller-trust.json`），也可用 `acktier owner requests --server http://127.0.0.1:8081 --dir ./data/owner` 通过一次性挑战签名查询。
+In **Join requests**, review the node public key, transports, and advertised routes. Add the verified requester to an ACL policy draft and export the complete `policy.json`. For API delegation, run `acktier owner controller-init --dir ./data/owner` on the owner computer and upload `controller-trust.json` under **Credentials and audit**. The command `acktier owner requests --server http://127.0.0.1:8081 --dir ./data/owner` can then query requests using a one-time signed challenge.
 
-控制端可用 `pkg/client.ControllerClient.Policy` 调用管理监听上的 `/api/v1/admin/policy/…`。这些接口与中心控制台共用生效策略查询、草稿和成员管理、ACL 校验编译、导出、验签预览、发布和历史版本读取。草稿修改、删除或导出时可传入上次读取的 `updatedAt`，草稿有更新时中心返回 `409 draft_changed`。发布仍需要在所有者设备签发的 `authorization.json`。
+Use `pkg/client.ControllerClient.Policy` to call `/api/v1/admin/policy/…` on the management listener. These endpoints share the console's operations for active policy, drafts and members, ACL validation and compilation, export, signed preview, publication, and history. Pass the last read `updatedAt` when modifying, deleting, or exporting a draft to catch concurrent edits. The center returns `409 draft_changed` if the draft was updated. Publication requires an `authorization.json` signed on the owner device.
 
-从当前签名快照新建草稿时，中心只复制能重新编译出同一快照的策略源。中心没有相符草稿时，先导入所有者签发用的完整 `policy.json`；不会用空 ACL 代替。可在「ACL 规则」用表单编辑、调整匹配顺序，也可导入 ACL JSON。保存只修改所选草稿，不会直接激活规则。
+When creating a draft from the active signed snapshot, the center copies a source policy that compiles to that snapshot. If it has no match, import the complete `policy.json` that the owner signed. In **ACL rules**, edit rules, change their matching order, or import ACL JSON. Saving updates the draft. Publication activates signed rules.
 
-列表是**中心提供的未核验信息**。在签发前，必须通过节点本机显示的公钥或另一可信渠道确认公钥归属，不能按名称盲签。所有者准备或从管理台导出完整 `policy.json`，例如（替换两个公钥占位符）：
+Treat join requests as **unverified information supplied by the center**. Confirm each device's public key from the node or another trusted channel before signing. The owner can prepare or export a full `policy.json` like the following, with both placeholders replaced by verified keys.
 
 ```json
 {
@@ -78,44 +78,44 @@ acktier up --server http://127.0.0.1:8080 --auth-key "<PRE_AUTH_KEY>" --hostname
 }
 ```
 
-- `id`、`name`、虚拟 IP 和 `nodeKey` 均由签发内容决定。可选 `ipv6`、`tags` 和 `routes`；授权出口时在该节点 `routes` 中加入 `0.0.0.0/0` 或 `::/0`，并按需配置 ACL。客户端仍须自行选用出口。空 ACL 默认拒绝业务流量。
-- 如需 NAT 探测，在签发草稿中设置 `stunAddr`、`stunAltAddr`（字面量 IP:端口）；中心中继固定连接节点本地配置的控制端地址。这样动态 NetMap 不能指挥节点把中继令牌交给其他主机。
-- 每次签发都是**完整替换**，不是增量。撤权时移除成员；换钥可在节点用新状态文件生成公钥并重新提交申请，所有者核对后替换旧公钥，可保留原签名地址。更新 ACL、DNS、路由或续期均重新签发。
+- The signed snapshot assigns `id`, `name`, virtual addresses, and `nodeKey`. `ipv6`, `tags`, and `routes` are optional. To authorize an exit, include `0.0.0.0/0` or `::/0` in the node's `routes` and configure the ACL. Each client selects its exit node separately. An empty ACL denies application traffic by default.
+- For NAT probing, set `stunAddr` and `stunAltAddr` to literal IP and port pairs in the signed policy. The node connects to the center relay at its locally configured control address. A NetMap cannot redirect relay tokens to an alternate host.
+- Each issuance replaces the **complete authorization**. To revoke a member, remove it. For key rotation, the node generates a key with a new state file and submits a request. After verifying it, the owner replaces the old public key and can keep the signed address. Reissue after ACL, DNS, or route changes and for renewal.
 
-在所有者电脑执行签名；此步可离线：
+Sign on the owner computer. This step can run offline.
 
 ```bash
 acktier owner sign --dir ./data/owner --policy ./policy.json --valid-for 168h
 ```
 
-再到管理台「签名发布」上传 `authorization.json`（支持发布前验签预览与变更对比）。无需访问签名私钥；如果已启用控制端 API 委托，也可运行：
+In **Publish authorization**, upload `authorization.json` to preview its signature and the changes. When controller API delegation is enabled, you can also publish from the CLI.
 
 ```bash
 acktier owner publish --server http://127.0.0.1:8081 --dir ./data/owner --file ./data/owner/authorization.json
 ```
 
-节点首次等批准后须再跑一次 `acktier up`，通常可直接复用已保存的令牌。已在线节点会通过现有流接收新版；签名更新切换时会清理旧会话和连接跟踪，由数据面重新建立连接。每次签发会导出同公钥、最低版本更新的 `trust.json`；给**新节点**分发已成功发布版本对应的文件。
+After first approval, run `acktier up` again. It can normally reuse the saved token. Online nodes receive newer signed snapshots through the current control stream. Installing a new authorization clears existing sessions and connection tracking so the data plane can reconnect. Each issuance exports a `trust.json` with the same public key and an updated minimum version. For **new nodes**, distribute the file corresponding to a successfully published version.
 
-## 协议及持久化
+## Protocol and persistence
 
-- **授权数据**：快照包含组网 ID（所有者公钥 SHA-256 指纹）、版本、过期时间、完整成员表、所有者 CLI 编译的包过滤表及 DNS/STUN 配置。Ed25519 对带 AckTier 专用前缀的原始 JSON 字节签名。网络传输中 payload 和签名是 Base64，不重新序列化后验签。
-- **连接数据**：中心分发同一个签名快照，并提供候选地址、链路质量等提示。节点只为已签名单中的公钥采用连接提示，忽略未签的授权字段。`NetMap.Revision` 只用于流同步，和所有者版本无关。
-- **防回滚**：节点在安装策略前持久化已验证的版本和摘要；需要同时满足本地最低版本。同版本不同内容或更旧版本拒绝。注册和后续 NetMap 均经过同一校验，不因缺少签名降级。
-- **中心管理 API**：`GET /api/v1/admin/owner/requests` 查看申请；`GET` / `PUT /api/v1/admin/owner/authorization` 查看、发布已签文件。启用委托后须证明持有专用控制端密钥；不是 Web 密码、节点令牌或申请码。申请码明文只在创建时返回。旧的直接换钥、ACL、路由和 DNS 修改接口在此模式下禁用。
-- **Web 登录和初始化**：管理台登录后使用限时会话；浏览器表单有防跨站校验。首次绑定只能成功一次，无法通过 Web 更换已保存的公钥。中心不通过页面发放节点的初始信任文件。
-- **存储**：中心使用 SQLite，节点本地状态和所有者签名目录不迁移。数据库保留公钥、已签快照与版本、申请和节点、密码哈希、草稿、委托和审计。申请码及节点令牌仅保存校验摘要，不保存明文。
+- **Authorization.** The snapshot includes the network ID (SHA-256 fingerprint of the owner public key), version, expiry, full member list, the packet filter compiled by the owner CLI, and DNS and STUN settings. Ed25519 signs raw JSON bytes with an AckTier-specific prefix. The wire payload and signature are Base64, and verification uses the original bytes.
+- **Connection hints.** The center distributes the same signed snapshot plus candidates and observations such as link quality. Nodes use hints only for keys listed in the signed snapshot. They disregard unsigned authorization fields. `NetMap.Revision` tracks stream synchronization independently of the owner version.
+- **Rollback protection.** Before installing policy, the node persists the verified version and digest. It enforces the configured minimum version and rejects older snapshots and different content under the same version. Both registration and streamed NetMaps require the same verification.
+- **Management API.** `GET /api/v1/admin/owner/requests` lists requests. `GET` or `PUT /api/v1/admin/owner/authorization` reads or publishes an authorization. Delegation requires proof of possession of its dedicated controller key. Plaintext enrollment keys are returned only at creation. Owner mode disables the legacy endpoints that directly change keys, ACLs, routes, and DNS.
+- **Web sign-in and setup.** Console sessions expire and browser forms use cross-site request protection. Initial binding succeeds once. Provision the initial trust file on nodes through an independent channel.
+- **Storage.** The center uses SQLite for public keys, signed snapshots and versions, requests, nodes, password hashes, drafts, delegation, and audit. Node state and the owner directory stay in their original locations. Enrollment keys and node tokens are stored as validation digests.
 
-## 中心存储与备份
+## Center storage and backups
 
-- 首次启动直接创建 `./data/center/server.sqlite`。可用 `-data /path/to/private/server.sqlite` 自定义路径；`-data=` 仅用于不持久化的临时联调。
-- 数据库须在**服务账号控制的本地私有目录**。Unix 目录和文件默认分别为 `0700` 和 `0600`；Windows 目录及子文件只允许服务账号、SYSTEM 和 Administrators。启动时会创建不存在的末级目录，但不会修改已有目录的权限。不要把库放在共享目录或让两个中心共用。
-- 停止中心后再备份数据库。如有 SQLite 日志文件也一并保留，不要手动删除恢复日志。恢复时使用最新可信备份，并核对所有者当前授权版本。必要时用可信的 `trust.json` 提高最低版本，再上传最新授权。
+- The first run creates `./data/center/server.sqlite`. Use `-data /path/to/private/server.sqlite` to change the path. Use `-data=` only for temporary tests.
+- Store the database in a **local private directory controlled by the service account**. On Unix, directories and files default to `0700` and `0600`. On Windows, only the service account, SYSTEM, and Administrators may access the directory and its files. Startup creates a missing final directory and preserves the permissions of existing directories. Give each center an exclusive local database.
+- Stop the center to back up its database. Keep any SQLite journal files with it for recovery. Restore the latest trusted backup and verify the owner's current authorization version. If needed, raise the minimum with a trusted `trust.json` and upload the latest signed authorization.
 
-登录后可在 Web 直接改密码。忘记密码时，停止中心，在主机上运行 `acktier-server reset-password`，再启动。若使用了自定义存储路径，重置时应传入相同的 `-data`。可用 `-admin-password-file` 提供新密码；未提供时随机生成，写入本机私有凭据文件。
+You can change the password while signed in. If it is forgotten, stop the center, run `acktier-server reset-password` on the host, and restart it. Supply the same `-data` for a custom path. Supply a replacement via `-admin-password-file` or use the generated password written to the private credentials file.
 
-## 失联、失陷与恢复
+## Outages, compromise, and recovery
 
-- **所有者关机**：不影响有效授权下的正常通信。到期前需要重新签发；默认签发有效期 7 天，可按业务与撤权时限调整。所有者不在线时无人能新增权限。
-- **中心失联**：现有能到达的对等链路可继续用，至控制面宽限（默认 4 小时）或签名有效期，取较早者。心跳不能延长签名有效期。中心返回 `401` / `403` 表示拒绝协调服务，不是签名撤权。
-- **中心失陷**：中心不能凭管理员权限替换节点公钥或扩大 ACL；仍可屏蔽连接、扣住更新和掌握组网元数据。已收到的新版签名撤权立即生效；若中心不分发，旧授权最多使用到自身签名到期。敏感服务仍应有独立的应用层认证。
-- **升级与恢复**：从没有所有者机制的版本升级后，先在中心 `/admin/` 绑定所有者，再给节点分发可信公钥。可保留节点状态及旧注册令牌，但可信成员表、IP、ACL 和路由需核验后重新签发，旧中心的配置不自动转为授权。不要回滚签名目录到旧备份再重复签发同一版本；备份私钥时一并保留最新版本记录。目前不支持在线替换所有者根或多签；根失陷或丢失且无法从备份恢复时，须通过独立渠道为中心和节点重新配置新根。
+- **Owner offline.** Nodes continue communicating under a valid authorization. Renew before it expires. The default signing lifetime is seven days and can be tuned to the required revocation window. Creating new grants requires the owner.
+- **Center unavailable.** Existing reachable peer links continue until the control lease expires (four hours by default) or the signed authorization expires, whichever is earlier. Heartbeats cannot extend the signature expiry. A center `401` or `403` denies coordination only. Signed policy governs revocation.
+- **Center compromised.** The center can block connections, withhold updates, and observe network metadata. Key replacement and ACL grants require the owner's signature. A received signed revocation applies immediately. An authorization withheld by the center expires at its signed deadline. Protect sensitive services with independent application authentication.
+- **Upgrade and recovery.** When upgrading from an older center without owner mode, bind the owner in `/admin/` and provision the trusted owner key on each node. Keep node state and registration tokens if desired. Verify and reissue the members, addresses, ACL, and routes. Keep the latest signing version with key backups to prevent version reuse. Replacing a lost or compromised root that cannot be recovered requires provisioning a new trust root on the center and nodes through an independent channel. The current release supports one owner root and local reconfiguration.

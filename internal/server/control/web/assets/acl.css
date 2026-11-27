@@ -28,6 +28,13 @@
 }
 
 .acl-rule-table {
+  --c2: "Source";
+  --c3: "Destination / port";
+  --c4: "Protocol";
+  --c5: "Actions";
+}
+
+.acl-rule-table:lang(zh-CN) {
   --c2: "来源";
   --c3: "目标 / 端口";
   --c4: "协议";

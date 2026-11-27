@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>AckTier 中心管理台</title>
+  <title data-i18n>AckTier Center Console</title>
   <link rel="stylesheet" href="/admin/assets/icons.css">
   <link rel="stylesheet" href="/admin/assets/base.css">
   <link rel="stylesheet" href="/admin/assets/components.css">
@@ -42,13 +42,13 @@
 
       <section class="auth-card" aria-labelledby="login-title">
         <header class="auth-heading">
-          <h1 id="login-title">管理员登录</h1>
-          <p>仅限中心管理员访问。</p>
+          <h1 id="login-title" data-i18n>Administrator sign-in</h1>
+          <p data-i18n>Center administrators only.</p>
         </header>
 
         <form id="login-form" class="form-stack" method="post" aria-labelledby="login-title">
           <div class="field">
-            <label for="current-password">管理员密码</label>
+            <label for="current-password" data-i18n>Administrator password</label>
             <div class="auth-password">
               <input
                 type="password"
@@ -60,12 +60,12 @@
                 aria-describedby="login-alert"
                 required
               >
-              <button type="button" id="toggle-pw-btn" class="btn ghost auth-reveal btn-eye icon-start" aria-label="显示密码" aria-controls="current-password" aria-pressed="false">显示</button>
+              <button type="button" id="toggle-pw-btn" class="btn ghost auth-reveal btn-eye icon-start" aria-label="Show password" aria-controls="current-password" aria-pressed="false" data-i18n-attrs="aria-label" data-i18n>Show</button>
             </div>
             <p id="login-alert" class="auth-error" role="alert" hidden></p>
           </div>
-          <button type="submit" id="login-submit" class="btn primary auth-submit">
-            登录
+          <button type="submit" id="login-submit" class="btn primary auth-submit" data-i18n>
+            Sign in
             <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
               <path d="M4 10h12m-5-5 5 5-5 5"/>
             </svg>
@@ -73,13 +73,20 @@
         </form>
 
         <details class="auth-help">
-          <summary>找不到管理员密码？</summary>
-          <p>首次登录：在中心主机的 <code>server-credentials.json</code> 中查看 <code>adminPassword</code>。</p>
-          <p>忘记密码：停止中心，执行 <code>acktier-server reset-password</code>，然后重新启动。</p>
+          <summary data-i18n>Need the administrator password?</summary>
+          <p data-i18n>For the initial password, open <code>server-credentials.json</code> on the center host and find <code>adminPassword</code>.</p>
+          <p data-i18n>To reset the password, stop the center and run  <code>acktier-server reset-password</code>, then restart it.</p>
         </details>
       </section>
 
-      <p class="auth-status"><span id="auth-state-badge">中心管理台</span></p>
+      <p class="auth-status"><span id="auth-state-badge" data-i18n>Center console</span></p>
+      <label class="language-control" for="auth-language">
+        <span data-i18n>Language</span>
+        <select id="auth-language" data-language-select>
+          <option value="en" lang="en">English</option>
+          <option value="zh-CN" lang="zh-CN">简体中文</option>
+        </select>
+      </label>
     </div>
   </main>
 
@@ -95,42 +102,49 @@
           </svg>
         </span>
         <div>
-          <div class="brand-name">AckTier 首次初始化向导</div>
-          <div class="brand-sub">状态：待绑定所有者公钥（节点入网与中继已暂停）</div>
+          <div class="brand-name" data-i18n>AckTier center setup</div>
+          <div class="brand-sub" data-i18n>Awaiting owner binding. Node enrollment and relaying are paused.</div>
         </div>
       </div>
       <div class="topbar-actions">
-        <button type="button" id="setup-theme-btn" class="btn ghost sm btn-theme icon-start" aria-label="切换深浅色主题">主题</button>
-        <button type="button" id="setup-logout-btn" class="btn secondary sm btn-logout icon-start">退出登录</button>
+        <label class="language-control" for="setup-language">
+          <span data-i18n>Language</span>
+          <select id="setup-language" data-language-select>
+            <option value="en" lang="en">English</option>
+            <option value="zh-CN" lang="zh-CN">简体中文</option>
+          </select>
+        </label>
+        <button type="button" id="setup-theme-btn" class="btn ghost sm btn-theme icon-start" aria-label="Toggle light or dark theme" data-i18n-attrs="aria-label" data-i18n>Theme</button>
+        <button type="button" id="setup-logout-btn" class="btn secondary sm btn-logout icon-start" data-i18n>Sign out</button>
       </div>
     </header>
 
     <main class="setup-main">
       <section class="card setup-card" aria-labelledby="setup-heading">
         <div class="toolbar-row between">
-          <span class="badge warn icon-start">等待初始化 · 仅允许单次绑定</span>
+          <span class="badge warn icon-start" data-i18n>Setup pending · Owner binding is permanent</span>
           <span class="mono muted">Root of Trust Pinning</span>
         </div>
-        <h1 id="setup-heading">绑定所选的所有者客户端公钥</h1>
-        <p class="muted">
-          请明确选定一台受信任的日常电脑作为组网所有者（控制端）。签名私钥永久保存在该电脑本地；中心仅绑定公开导出的 <code>trust.json</code>。
+        <h1 id="setup-heading" data-i18n>Bind the owner public key</h1>
+        <p class="muted" data-i18n>
+          Choose a trusted computer to act as the network owner. Keep the signing key on that computer and give the center its public  <code>trust.json</code>.
         </p>
 
         <ol class="wizard-steps">
           <li>
             <span class="step-num">STEP 01</span>
-            <strong>本地初始化根密钥</strong>
-            <p class="muted">在所有者电脑执行 <code>acktier owner init --dir ./data/owner</code>，离线保管好 <code>signer.json</code>。</p>
+            <strong data-i18n>Initialize a root key locally</strong>
+            <p class="muted" data-i18n>On the owner computer, run  <code>acktier owner init --dir ./data/owner</code> and keep a secure offline backup of  <code>signer.json</code>.</p>
           </li>
           <li>
             <span class="step-num">STEP 02</span>
-            <strong>上传并核对组网指纹</strong>
-            <p class="muted">在下方选择公开的 <code>trust.json</code>（切勿选择私钥文件），核对 SHA-256 组网指纹。</p>
+            <strong data-i18n>Upload and verify the network fingerprint</strong>
+            <p class="muted" data-i18n>Select the public  <code>trust.json</code> below and verify its SHA-256 network fingerprint. Keep the private key on the owner computer.</p>
           </li>
           <li>
             <span class="step-num">STEP 03</span>
-            <strong>锁定信任根并开放协调</strong>
-            <p class="muted">持久化后立即开放申请接收；Web 管理台无权覆盖或更换已绑定的所有者根密钥。</p>
+            <strong data-i18n>Bind the trust root and enable coordination</strong>
+            <p class="muted" data-i18n>The center accepts join requests after binding. The Web console cannot replace the owner root key.</p>
           </li>
         </ol>
 
@@ -138,28 +152,28 @@
 
         <form id="setup-form" class="form-stack">
           <div class="field">
-            <label for="trust-file-input">所有者公开信任文件 <code>trust.json</code></label>
+            <label for="trust-file-input" data-i18n>Public owner trust file  <code>trust.json</code></label>
             <div id="trust-dropzone" class="dropzone">
               <input type="file" id="trust-file-input" accept=".json,application/json" aria-describedby="setup-alert" required>
               <span class="dropzone-glyph icon" aria-hidden="true"></span>
               <div class="dropzone-copy">
-                <span id="trust-file-title" class="dropzone-title">点击选择或拖拽 trust.json 到此处</span>
-                <span id="trust-file-sub" class="dropzone-sub">仅接受公开信任配置（上限 16 KiB），浏览器将在本地先行拦截任何私钥文件</span>
+                <span id="trust-file-title" class="dropzone-title" data-i18n>Select or drop trust.json here</span>
+                <span id="trust-file-sub" class="dropzone-sub" data-i18n>Public trust files up to 16 KiB. The browser rejects private key files before upload.</span>
               </div>
             </div>
           </div>
 
           <div id="trust-preview-box" class="preview-card" hidden>
             <div class="preview-header">
-              <span class="badge ok icon-start">格式校验通过 · 公开信任根预览</span>
+              <span class="badge ok icon-start" data-i18n>Trust file validated</span>
             </div>
             <dl class="kv-grid">
               <div>
-                <dt>组网指纹 (Network ID)</dt>
+                <dt data-i18n>Network fingerprint (Network ID)</dt>
                 <dd><code id="preview-netid" class="mono breakable"></code></dd>
               </div>
               <div>
-                <dt>所有者 Ed25519 公钥</dt>
+                <dt data-i18n>Owner Ed25519 public key</dt>
                 <dd><code id="preview-pubkey" class="mono breakable"></code></dd>
               </div>
             </dl>
@@ -167,11 +181,11 @@
 
           <label class="checkbox-row" for="setup-confirm-check">
             <input type="checkbox" id="setup-confirm-check" required disabled>
-            <span>我已通过可信渠道核对上述组网指纹，确认该 <code>trust.json</code> 来自我选定的所有者客户端（且未上传私钥）。</span>
+            <span data-i18n>I verified the fingerprint over a trusted channel and confirmed that  <code>trust.json</code>  came from my selected owner computer and contains only public trust information.</span>
           </label>
 
           <div class="form-actions">
-            <button type="submit" id="setup-submit-btn" class="btn primary btn-check icon-start" disabled>确认绑定所有者</button>
+            <button type="submit" id="setup-submit-btn" class="btn primary btn-check icon-start" disabled data-i18n>Bind owner</button>
           </div>
         </form>
       </section>
@@ -180,10 +194,10 @@
 
   <!-- Main Authenticated Console Shell -->
   <div id="app-shell" class="app-shell" hidden>
-    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <a class="skip-link" href="#main-content" data-i18n>Skip to main content</a>
     <div class="sidebar">
       <div class="sidebar-header">
-        <a class="sidebar-brand" href="#overview" aria-label="AckTier，返回概览">
+        <a class="sidebar-brand" href="#overview" aria-label="AckTier overview" data-i18n-attrs="aria-label">
           <span class="brand-mark" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path d="m12 2.5 8.2 4.75v9.5L12 21.5l-8.2-4.75v-9.5L12 2.5Z"/>
@@ -193,20 +207,20 @@
           </span>
           <span>
             <span class="brand-name">AckTier</span>
-            <span class="brand-sub">中心管理台</span>
+            <span class="brand-sub" data-i18n>Center console</span>
           </span>
         </a>
-        <button type="button" class="nav-toggle" id="console-nav-toggle" aria-controls="console-nav" aria-expanded="false" hidden>
+        <button type="button" class="nav-toggle" id="console-nav-toggle" aria-controls="console-nav" aria-expanded="false" hidden data-i18n>
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M5 8h14M5 16h14"/>
           </svg>
-          导航
+          Menu
         </button>
       </div>
 
-      <nav id="console-nav" class="nav-list" aria-label="主导航">
+      <nav id="console-nav" class="nav-list" aria-label="Main" data-i18n-attrs="aria-label">
         <div class="nav-group">
-          <h2 class="nav-group-label" id="nav-network">组网</h2>
+          <h2 class="nav-group-label" id="nav-network" data-i18n>Network</h2>
           <ul class="nav-links" aria-labelledby="nav-network" role="list">
             <li>
               <a href="#overview" data-route="overview" class="nav-item" aria-current="page">
@@ -216,7 +230,7 @@
                   <circle cx="18.5" cy="17.5" r="2.5"/>
                   <path d="m10.8 7.7-4 7.6m6.4-7.6 4 7.6M8 17.5h8"/>
                 </svg>
-                <span class="nav-label">概览与拓扑</span>
+                <span class="nav-label" data-i18n>Overview and topology</span>
               </a>
             </li>
             <li>
@@ -225,7 +239,7 @@
                   <circle cx="9" cy="7" r="3"/>
                   <path d="M3.5 20v-2a4 4 0 0 1 4-4h3a4 4 0 0 1 4 4v2m2-10h5M19 7.5v5"/>
                 </svg>
-                <span class="nav-label">入网申请</span>
+                <span class="nav-label" data-i18n>Join requests</span>
                 <span id="nav-badge-requests" class="nav-count" hidden>0</span>
               </a>
             </li>
@@ -236,13 +250,13 @@
                   <rect x="3" y="13.5" width="18" height="6" rx="1.5"/>
                   <path d="M7 7.5h.01M7 16.5h.01M13 7.5h4m-4 9h4"/>
                 </svg>
-                <span class="nav-label">节点与能力</span>
+                <span class="nav-label" data-i18n>Nodes and capabilities</span>
               </a>
             </li>
           </ul>
         </div>
         <div class="nav-group">
-          <h2 class="nav-group-label" id="nav-policy">策略</h2>
+          <h2 class="nav-group-label" id="nav-policy" data-i18n>Policy</h2>
           <ul class="nav-links" aria-labelledby="nav-policy" role="list">
             <li>
               <a href="#policy" data-route="policy" class="nav-item">
@@ -250,7 +264,7 @@
                   <path d="M12 21c4.3-1.9 7-4.9 7-9V6l-7-3-7 3v6c0 4.1 2.7 7.1 7 9Z"/>
                   <path d="M9 10.5h6m-6 3h6"/>
                 </svg>
-                <span class="nav-label">ACL 草稿</span>
+                <span class="nav-label" data-i18n>ACL drafts</span>
                 <span id="nav-badge-drafts" class="nav-count" hidden>0</span>
               </a>
             </li>
@@ -260,13 +274,13 @@
                   <path d="M13.5 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5L13.5 3Z"/>
                   <path d="M13 3v6h6m-10 6 2 2 4-4"/>
                 </svg>
-                <span class="nav-label">签名发布</span>
+                <span class="nav-label" data-i18n>Publish authorization</span>
               </a>
             </li>
           </ul>
         </div>
         <div class="nav-group">
-          <h2 class="nav-group-label" id="nav-admin">管理</h2>
+          <h2 class="nav-group-label" id="nav-admin" data-i18n>Administration</h2>
           <ul class="nav-links" aria-labelledby="nav-admin" role="list">
             <li>
               <a href="#security" data-route="security" class="nav-item">
@@ -274,7 +288,7 @@
                   <circle cx="8" cy="16" r="4"/>
                   <path d="m10.8 13.2 8.7-8.7m-5 5 2.5 2.5m.5-5.5L20 9"/>
                 </svg>
-                <span class="nav-label">凭据与审计</span>
+                <span class="nav-label" data-i18n>Credentials and audit</span>
               </a>
             </li>
           </ul>
@@ -286,28 +300,35 @@
           <rect x="5" y="10" width="14" height="10" rx="2"/>
           <path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v2"/>
         </svg>
-        <span>签名私钥留在所有者端</span>
+        <span data-i18n>The signing key stays with the owner</span>
       </div>
     </div>
 
     <div class="workspace">
       <header class="topbar">
         <div class="topbar-status">
-          <span class="badge ok icon-start">所有者已绑定</span>
+          <span class="badge ok icon-start" data-i18n>Owner bound</span>
           <span class="net-chip">
-            <span class="muted">组网</span>
+            <span class="muted" data-i18n>Network</span>
             <code id="top-network-id" class="mono">—</code>
             <span class="copy">
-              <button type="button" class="copy-button icon-start" command="--copy" commandfor="top-network-id" aria-label="复制组网指纹">复制</button>
+              <button type="button" class="copy-button icon-start" command="--copy" commandfor="top-network-id" aria-label="Copy network fingerprint" data-i18n-attrs="aria-label" data-i18n>Copy</button>
               <span class="tip" role="status"></span>
             </span>
           </span>
         </div>
 
         <div class="topbar-actions">
-          <button type="button" id="refresh-view-btn" class="btn ghost sm btn-refresh icon-start">刷新</button>
-          <button type="button" id="theme-toggle-btn" class="btn ghost sm btn-theme icon-start" aria-label="切换深浅色主题">主题</button>
-          <button type="button" id="logout-btn" class="btn secondary sm btn-logout icon-start">退出</button>
+          <label class="language-control" for="console-language">
+            <span data-i18n>Language</span>
+            <select id="console-language" data-language-select>
+              <option value="en" lang="en">English</option>
+              <option value="zh-CN" lang="zh-CN">简体中文</option>
+            </select>
+          </label>
+          <button type="button" id="refresh-view-btn" class="btn ghost sm btn-refresh icon-start" data-i18n>Refresh</button>
+          <button type="button" id="theme-toggle-btn" class="btn ghost sm btn-theme icon-start" aria-label="Toggle light or dark theme" data-i18n-attrs="aria-label" data-i18n>Theme</button>
+          <button type="button" id="logout-btn" class="btn secondary sm btn-logout icon-start" data-i18n>Sign out</button>
         </div>
       </header>
 
@@ -318,8 +339,8 @@
   <!-- Shared Modal Dialog (native top-layer <dialog>) -->
   <dialog id="modal-dialog" closedby="any" aria-labelledby="modal-title">
     <div class="dialog-header">
-      <h1 id="modal-title" class="dialog-title">对话框</h1>
-      <button type="button" id="modal-close-btn" class="btn ghost sm btn-close icon-start" aria-label="关闭窗口">关闭</button>
+      <h1 id="modal-title" class="dialog-title" data-i18n>Dialog</h1>
+      <button type="button" id="modal-close-btn" class="btn ghost sm btn-close icon-start" aria-label="Close dialog" data-i18n-attrs="aria-label" data-i18n>Close</button>
     </div>
     <div id="modal-body" class="dialog-body"></div>
   </dialog>
