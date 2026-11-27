@@ -153,7 +153,8 @@ func (s *Server) requireDelegatedController(next http.HandlerFunc) http.HandlerF
 			return
 		}
 		limit := int64(adminPolicyLimit)
-		if r.URL.Path == "/api/v1/admin/owner/authorization" {
+		switch r.URL.Path {
+		case "/api/v1/admin/owner/authorization", delegatedPolicyPath + "/authorization", delegatedPolicyPath + "/authorization/preview":
 			limit = owner.MaxEnvelope
 		}
 		var raw []byte

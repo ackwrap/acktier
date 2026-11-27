@@ -19,27 +19,46 @@ import (
 	"github.com/ackwrap/acktier/pkg/types"
 )
 
+const delegatedPolicyPath = "/api/v1/admin/policy"
+
+type policyHandler func(http.ResponseWriter, *http.Request, string)
+
 func (a *webAdmin) mountPolicyAPI(mux *http.ServeMux) {
-	mux.HandleFunc("GET /admin/api/policy/active", a.pinned(a.activePolicy))
-	mux.HandleFunc("POST /admin/api/policy/validate", a.pinned(a.validatePolicyStateless))
-
-	mux.HandleFunc("GET /admin/api/drafts", a.pinned(a.listDrafts))
-	mux.HandleFunc("POST /admin/api/drafts", a.pinned(a.createDraft))
-	mux.HandleFunc("GET /admin/api/drafts/{id}", a.pinned(a.getDraft))
-	mux.HandleFunc("PUT /admin/api/drafts/{id}", a.pinned(a.updateDraft))
-	mux.HandleFunc("DELETE /admin/api/drafts/{id}", a.pinned(a.deleteDraft))
-	mux.HandleFunc("POST /admin/api/drafts/{id}/acl", a.pinned(a.applyDraftACL))
-	mux.HandleFunc("POST /admin/api/drafts/{id}/members", a.pinned(a.addDraftMember))
-	mux.HandleFunc("DELETE /admin/api/drafts/{id}/members/{key}", a.pinned(a.removeDraftMember))
-	mux.HandleFunc("GET /admin/api/drafts/{id}/export", a.pinned(a.exportDraft))
-
-	mux.HandleFunc("POST /admin/api/authorization/preview", a.pinned(a.previewAuthorization))
-	mux.HandleFunc("POST /admin/api/authorization", a.pinned(a.publishAuthorization))
-	mux.HandleFunc("GET /admin/api/authorization/history", a.pinned(a.authorizationHistory))
-	mux.HandleFunc("GET /admin/api/authorization/history/{version}", a.pinned(a.authorizationByVersion))
+	a.mountPolicyRoutes(mux, "/admin/api/policy", "/admin/api", func(handler policyHandler) http.HandlerFunc {
+		return a.pinned(func(w http.ResponseWriter, r *http.Request, session webSession) {
+			handler(w, r, actor(session))
+		})
+	})
+	a.mountPolicyRoutes(mux, delegatedPolicyPath, delegatedPolicyPath, func(handler policyHandler) http.HandlerFunc {
+		return a.server.requireDelegatedController(func(w http.ResponseWriter, r *http.Request) {
+			handler(w, r, a.server.controllerActor())
+		})
+	})
 }
 
-func (a *webAdmin) activePolicy(w http.ResponseWriter, r *http.Request, s webSession) {
+func (a *webAdmin) mountPolicyRoutes(mux *http.ServeMux, policyPath, resourcePath string, protect func(policyHandler) http.HandlerFunc) {
+	mux.HandleFunc("GET "+policyPath+"/active", protect(a.activePolicy))
+	mux.HandleFunc("POST "+policyPath+"/validate", protect(a.validatePolicyStateless))
+
+	drafts := resourcePath + "/drafts"
+	mux.HandleFunc("GET "+drafts, protect(a.listDrafts))
+	mux.HandleFunc("POST "+drafts, protect(a.createDraft))
+	mux.HandleFunc("GET "+drafts+"/{id}", protect(a.getDraft))
+	mux.HandleFunc("PUT "+drafts+"/{id}", protect(a.updateDraft))
+	mux.HandleFunc("DELETE "+drafts+"/{id}", protect(a.deleteDraft))
+	mux.HandleFunc("POST "+drafts+"/{id}/acl", protect(a.applyDraftACL))
+	mux.HandleFunc("POST "+drafts+"/{id}/members", protect(a.addDraftMember))
+	mux.HandleFunc("DELETE "+drafts+"/{id}/members/{key}", protect(a.removeDraftMember))
+	mux.HandleFunc("GET "+drafts+"/{id}/export", protect(a.exportDraft))
+
+	authorization := resourcePath + "/authorization"
+	mux.HandleFunc("POST "+authorization+"/preview", protect(a.previewAuthorization))
+	mux.HandleFunc("POST "+authorization, protect(a.publishAuthorization))
+	mux.HandleFunc("GET "+authorization+"/history", protect(a.authorizationHistory))
+	mux.HandleFunc("GET "+authorization+"/history/{version}", protect(a.authorizationByVersion))
+}
+
+func (a *webAdmin) activePolicy(w http.ResponseWriter, r *http.Request, _ string) {
 	_, verified, _ := a.server.store.OwnerTopology()
 	now := time.Now()
 	if verified == nil {
@@ -60,7 +79,7 @@ func (a *webAdmin) activePolicy(w http.ResponseWriter, r *http.Request, s webSes
 	})
 }
 
-func (a *webAdmin) validatePolicyStateless(w http.ResponseWriter, r *http.Request, s webSession) {
+func (a *webAdmin) validatePolicyStateless(w http.ResponseWriter, r *http.Request, _ string) {
 	var req struct {
 		Policy      owner.Policy `json:"policy"`
 		BaseVersion uint64       `json:"baseVersion"`
@@ -99,7 +118,7 @@ func summarizeDraft(d store.Draft, active *owner.Verified, records []store.Store
 	}
 }
 
-func (a *webAdmin) listDrafts(w http.ResponseWriter, r *http.Request, s webSession) {
+func (a *webAdmin) listDrafts(w http.ResponseWriter, r *http.Request, _ string) {
 	_, verified, records := a.server.store.OwnerTopology()
 	drafts := a.server.store.ListDrafts()
 	out := make([]draftSummary, 0, len(drafts))
@@ -165,7 +184,7 @@ func normalizePolicySlices(p *owner.Policy) {
 	}
 }
 
-func (a *webAdmin) createDraft(w http.ResponseWriter, r *http.Request, s webSession) {
+func (a *webAdmin) createDraft(w http.ResponseWriter, r *http.Request, actorID string) {
 	var req struct {
 		Name       string        `json:"name"`
 		Note       string        `json:"note"`
@@ -215,14 +234,14 @@ func (a *webAdmin) createDraft(w http.ResponseWriter, r *http.Request, s webSess
 		apiError(w, http.StatusInternalServerError, "storage", "保存草稿失败，请检查中心的存储。")
 		return
 	}
-	a.server.audit(actor(s), "draft.create", saved.ID, "success", fmt.Sprintf("base=v%d", saved.BaseVersion))
+	a.server.audit(actorID, "draft.create", saved.ID, "success", fmt.Sprintf("base=v%d", saved.BaseVersion))
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"draft":    saved,
 		"analysis": analyzePolicy(saved.Policy, saved.BaseVersion, verified, records),
 	})
 }
 
-func (a *webAdmin) getDraft(w http.ResponseWriter, r *http.Request, s webSession) {
+func (a *webAdmin) getDraft(w http.ResponseWriter, r *http.Request, _ string) {
 	d, err := a.server.store.GetDraft(r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		apiError(w, http.StatusNotFound, "not_found", "找不到该草稿。")
@@ -238,13 +257,49 @@ func (a *webAdmin) getDraft(w http.ResponseWriter, r *http.Request, s webSession
 	})
 }
 
-func (a *webAdmin) updateDraft(w http.ResponseWriter, r *http.Request, s webSession) {
-	existing, err := a.server.store.GetDraft(r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) {
+func policyDraftRevision(w http.ResponseWriter, r *http.Request) (time.Time, bool) {
+	raw := r.URL.Query().Get("revision")
+	if raw == "" {
+		return time.Time{}, true
+	}
+	revision, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil || revision.IsZero() {
+		apiError(w, http.StatusBadRequest, "bad_revision", "草稿版本无效，请刷新后重试。")
+		return time.Time{}, false
+	}
+	return revision, true
+}
+
+func writePolicyDraftError(w http.ResponseWriter, action string, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		apiError(w, http.StatusNotFound, "not_found", "找不到该草稿。")
-		return
-	} else if err != nil {
-		apiError(w, http.StatusInternalServerError, "storage", "读取草稿失败。")
+	case errors.Is(err, store.ErrDraftChanged):
+		apiError(w, http.StatusConflict, "draft_changed", "草稿已经更新，请刷新并核对最新内容后重试。")
+	default:
+		log.Printf("[web-admin] %s draft: %v", action, err)
+		apiError(w, http.StatusInternalServerError, "storage", "草稿操作失败，请检查中心的存储。")
+	}
+}
+
+func (a *webAdmin) draftAtRevision(w http.ResponseWriter, r *http.Request) (store.Draft, bool) {
+	revision, ok := policyDraftRevision(w, r)
+	if !ok {
+		return store.Draft{}, false
+	}
+	draft, err := a.server.store.GetDraft(r.PathValue("id"))
+	if err == nil && !revision.IsZero() && !revision.Equal(draft.UpdatedAt) {
+		err = store.ErrDraftChanged
+	}
+	if err != nil {
+		writePolicyDraftError(w, "read", err)
+	}
+	return draft, err == nil
+}
+
+func (a *webAdmin) updateDraft(w http.ResponseWriter, r *http.Request, actorID string) {
+	existing, ok := a.draftAtRevision(w, r)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -288,38 +343,34 @@ func (a *webAdmin) updateDraft(w http.ResponseWriter, r *http.Request, s webSess
 		apiError(w, http.StatusBadRequest, "invalid_policy", msg)
 		return
 	}
-	saved, err := a.server.store.SaveDraft(existing)
+	saved, err := a.server.store.UpdateDraft(existing)
 	if err != nil {
-		log.Printf("[web-admin] save draft: %v", err)
-		apiError(w, http.StatusInternalServerError, "storage", "保存草稿失败，请检查中心的存储。")
+		writePolicyDraftError(w, "update", err)
 		return
 	}
-	a.server.audit(actor(s), "draft.update", saved.ID, "success", fmt.Sprintf("base=v%d valid=%t", saved.BaseVersion, analysis.Valid))
+	a.server.audit(actorID, "draft.update", saved.ID, "success", fmt.Sprintf("base=v%d valid=%t", saved.BaseVersion, analysis.Valid))
 	writeJSON(w, http.StatusOK, map[string]any{"draft": saved, "analysis": analysis})
 }
 
-func (a *webAdmin) deleteDraft(w http.ResponseWriter, r *http.Request, s webSession) {
-	id := r.PathValue("id")
-	if err := a.server.store.DeleteDraft(id); errors.Is(err, store.ErrNotFound) {
-		apiError(w, http.StatusNotFound, "not_found", "找不到该草稿。")
-		return
-	} else if err != nil {
-		apiError(w, http.StatusInternalServerError, "storage", "删除草稿失败。")
+func (a *webAdmin) deleteDraft(w http.ResponseWriter, r *http.Request, actorID string) {
+	revision, ok := policyDraftRevision(w, r)
+	if !ok {
 		return
 	}
-	a.server.audit(actor(s), "draft.delete", id, "success", "")
+	id := r.PathValue("id")
+	if err := a.server.store.DeleteDraftAt(id, revision); err != nil {
+		writePolicyDraftError(w, "delete", err)
+		return
+	}
+	a.server.audit(actorID, "draft.delete", id, "success", "")
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // applyDraftACL replaces ONLY the ACL section of an existing draft without
 // clearing members, DNS, or approved routes (CENTER_REQUIREMENTS §4.2.1).
-func (a *webAdmin) applyDraftACL(w http.ResponseWriter, r *http.Request, s webSession) {
-	d, err := a.server.store.GetDraft(r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) {
-		apiError(w, http.StatusNotFound, "not_found", "找不到该草稿。")
-		return
-	} else if err != nil {
-		apiError(w, http.StatusInternalServerError, "storage", "读取草稿失败。")
+func (a *webAdmin) applyDraftACL(w http.ResponseWriter, r *http.Request, actorID string) {
+	d, ok := a.draftAtRevision(w, r)
+	if !ok {
 		return
 	}
 	var pol types.ACLPolicy
@@ -335,14 +386,14 @@ func (a *webAdmin) applyDraftACL(w http.ResponseWriter, r *http.Request, s webSe
 		pol.ACLs = []types.ACLGrantEntry{}
 	}
 	d.Policy.ACL = pol
-	saved, err := a.server.store.SaveDraft(d)
+	saved, err := a.server.store.UpdateDraft(d)
 	if err != nil {
-		apiError(w, http.StatusInternalServerError, "storage", "保存草稿失败，请检查中心的存储。")
+		writePolicyDraftError(w, "update", err)
 		return
 	}
 	_, verified, records := a.server.store.OwnerTopology()
 	analysis := analyzePolicy(saved.Policy, saved.BaseVersion, verified, records)
-	a.server.audit(actor(s), "draft.acl", saved.ID, "success", fmt.Sprintf("rules=%d", len(pol.ACLs)))
+	a.server.audit(actorID, "draft.acl", saved.ID, "success", fmt.Sprintf("rules=%d", len(pol.ACLs)))
 	writeJSON(w, http.StatusOK, map[string]any{"draft": saved, "analysis": analysis})
 }
 
@@ -356,13 +407,9 @@ type addMemberRequest struct {
 	Routes  []string     `json:"routes"`
 }
 
-func (a *webAdmin) addDraftMember(w http.ResponseWriter, r *http.Request, s webSession) {
-	d, err := a.server.store.GetDraft(r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) {
-		apiError(w, http.StatusNotFound, "not_found", "找不到该草稿。")
-		return
-	} else if err != nil {
-		apiError(w, http.StatusInternalServerError, "storage", "读取草稿失败。")
+func (a *webAdmin) addDraftMember(w http.ResponseWriter, r *http.Request, actorID string) {
+	d, ok := a.draftAtRevision(w, r)
+	if !ok {
 		return
 	}
 	var req addMemberRequest
@@ -440,12 +487,12 @@ func (a *webAdmin) addDraftMember(w http.ResponseWriter, r *http.Request, s webS
 		return
 	}
 	d.Policy.Members = testPol.Members
-	saved, err := a.server.store.SaveDraft(d)
+	saved, err := a.server.store.UpdateDraft(d)
 	if err != nil {
-		apiError(w, http.StatusInternalServerError, "storage", "保存草稿失败，请检查中心的存储。")
+		writePolicyDraftError(w, "update", err)
 		return
 	}
-	a.server.audit(actor(s), "draft.add_member", saved.ID, "success", fmt.Sprintf("%s (%s)", member.Name, shortKey(nk.String())))
+	a.server.audit(actorID, "draft.add_member", saved.ID, "success", fmt.Sprintf("%s (%s)", member.Name, shortKey(nk.String())))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"draft":    saved,
 		"member":   member,
@@ -453,13 +500,9 @@ func (a *webAdmin) addDraftMember(w http.ResponseWriter, r *http.Request, s webS
 	})
 }
 
-func (a *webAdmin) removeDraftMember(w http.ResponseWriter, r *http.Request, s webSession) {
-	d, err := a.server.store.GetDraft(r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) {
-		apiError(w, http.StatusNotFound, "not_found", "找不到该草稿。")
-		return
-	} else if err != nil {
-		apiError(w, http.StatusInternalServerError, "storage", "读取草稿失败。")
+func (a *webAdmin) removeDraftMember(w http.ResponseWriter, r *http.Request, actorID string) {
+	d, ok := a.draftAtRevision(w, r)
+	if !ok {
 		return
 	}
 	nk, ok := parseKeyParam(r)
@@ -479,26 +522,22 @@ func (a *webAdmin) removeDraftMember(w http.ResponseWriter, r *http.Request, s w
 		return
 	}
 	d.Policy.Members = kept
-	saved, err := a.server.store.SaveDraft(d)
+	saved, err := a.server.store.UpdateDraft(d)
 	if err != nil {
-		apiError(w, http.StatusInternalServerError, "storage", "保存草稿失败。")
+		writePolicyDraftError(w, "remove member", err)
 		return
 	}
 	_, verified, records := a.server.store.OwnerTopology()
-	a.server.audit(actor(s), "draft.remove_member", saved.ID, "success", shortKey(nk.String()))
+	a.server.audit(actorID, "draft.remove_member", saved.ID, "success", shortKey(nk.String()))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"draft":    saved,
 		"analysis": analyzePolicy(saved.Policy, saved.BaseVersion, verified, records),
 	})
 }
 
-func (a *webAdmin) exportDraft(w http.ResponseWriter, r *http.Request, s webSession) {
-	d, err := a.server.store.GetDraft(r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) {
-		apiError(w, http.StatusNotFound, "not_found", "找不到该草稿。")
-		return
-	} else if err != nil {
-		apiError(w, http.StatusInternalServerError, "storage", "读取草稿失败。")
+func (a *webAdmin) exportDraft(w http.ResponseWriter, r *http.Request, actorID string) {
+	d, ok := a.draftAtRevision(w, r)
+	if !ok {
 		return
 	}
 	_, verified, records := a.server.store.OwnerTopology()
@@ -512,7 +551,7 @@ func (a *webAdmin) exportDraft(w http.ResponseWriter, r *http.Request, s webSess
 		apiError(w, http.StatusInternalServerError, "encode", "序列化草稿失败。")
 		return
 	}
-	a.server.audit(actor(s), "draft.export", d.ID, "success", fmt.Sprintf("base=v%d members=%d", d.BaseVersion, len(d.Policy.Members)))
+	a.server.audit(actorID, "draft.export", d.ID, "success", fmt.Sprintf("base=v%d members=%d", d.BaseVersion, len(d.Policy.Members)))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-policy.json"`, d.ID))
 	w.WriteHeader(http.StatusOK)
@@ -542,7 +581,7 @@ func explainPublishError(err error) (int, string, string) {
 	}
 }
 
-func (a *webAdmin) previewAuthorization(w http.ResponseWriter, r *http.Request, s webSession) {
+func (a *webAdmin) previewAuthorization(w http.ResponseWriter, r *http.Request, _ string) {
 	var env types.OwnerAuthorization
 	if err := readStrict(w, r, owner.MaxEnvelope, &env); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_envelope", "文件不是合法的 authorization.json（请勿上传 signer.json 或未签名的草稿）。")
@@ -569,7 +608,7 @@ func (a *webAdmin) previewAuthorization(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (a *webAdmin) publishAuthorization(w http.ResponseWriter, r *http.Request, s webSession) {
+func (a *webAdmin) publishAuthorization(w http.ResponseWriter, r *http.Request, actorID string) {
 	var env types.OwnerAuthorization
 	if err := readStrict(w, r, owner.MaxEnvelope, &env); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_envelope", "文件不是合法的 authorization.json。")
@@ -583,16 +622,16 @@ func (a *webAdmin) publishAuthorization(w http.ResponseWriter, r *http.Request, 
 		if next != nil {
 			target = fmt.Sprintf("v%d", next.Checkpoint.Version)
 		}
-		a.server.audit(actor(s), "authorization.publish", target, "failure", code)
+		a.server.audit(actorID, "authorization.publish", target, "failure", code)
 		apiError(w, status, code, reason)
 		return
 	}
 	version, err := a.server.publishOwner(env, store.AuditEntry{
-		Actor: actor(s), Action: "authorization.publish", Result: "success",
+		Actor: actorID, Action: "authorization.publish", Result: "success",
 	})
 	if err != nil {
 		status, code, reason := explainPublishError(err)
-		a.server.audit(actor(s), "authorization.publish", fmt.Sprintf("v%d", next.Checkpoint.Version), "failure", code)
+		a.server.audit(actorID, "authorization.publish", fmt.Sprintf("v%d", next.Checkpoint.Version), "failure", code)
 		apiError(w, status, code, reason)
 		return
 	}
@@ -614,7 +653,7 @@ type publicationSummary struct {
 	Active      bool      `json:"active"`
 }
 
-func (a *webAdmin) authorizationHistory(w http.ResponseWriter, r *http.Request, s webSession) {
+func (a *webAdmin) authorizationHistory(w http.ResponseWriter, r *http.Request, _ string) {
 	_, active, _ := a.server.store.OwnerTopology()
 	var activeVer uint64
 	if active != nil {
@@ -634,7 +673,7 @@ func (a *webAdmin) authorizationHistory(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (a *webAdmin) authorizationByVersion(w http.ResponseWriter, r *http.Request, s webSession) {
+func (a *webAdmin) authorizationByVersion(w http.ResponseWriter, r *http.Request, _ string) {
 	ver, err := strconv.ParseUint(r.PathValue("version"), 10, 64)
 	if err != nil || ver == 0 {
 		apiError(w, http.StatusBadRequest, "bad_version", "版本号无效。")

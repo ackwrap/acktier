@@ -152,8 +152,19 @@ func (s *FileStore) GetDraft(id string) (Draft, error) {
 	return cloneDraft(d), nil
 }
 
+var ErrDraftChanged = errors.New("draft changed since it was read")
+
 // SaveDraft creates a draft when d.ID is empty, otherwise replaces an existing one.
 func (s *FileStore) SaveDraft(d Draft) (Draft, error) {
+	return s.saveDraft(d, false)
+}
+
+// UpdateDraft replaces a draft if its stored revision still matches d.UpdatedAt.
+func (s *FileStore) UpdateDraft(d Draft) (Draft, error) {
+	return s.saveDraft(d, true)
+}
+
+func (s *FileStore) saveDraft(d Draft, checkRevision bool) (Draft, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.data.Drafts == nil {
@@ -161,7 +172,7 @@ func (s *FileStore) SaveDraft(d Draft) (Draft, error) {
 	}
 	now := time.Now().UTC()
 	prev, existed := s.data.Drafts[d.ID]
-	if d.ID == "" {
+	if d.ID == "" && !checkRevision {
 		if len(s.data.Drafts) >= MaxDrafts {
 			return Draft{}, ErrTooManyDrafts
 		}
@@ -172,6 +183,12 @@ func (s *FileStore) SaveDraft(d Draft) (Draft, error) {
 	} else if !existed {
 		return Draft{}, ErrNotFound
 	} else {
+		if checkRevision && !d.UpdatedAt.Equal(prev.UpdatedAt) {
+			return Draft{}, ErrDraftChanged
+		}
+		if !now.After(prev.UpdatedAt) {
+			now = prev.UpdatedAt.Add(time.Nanosecond)
+		}
 		d.CreatedAt = prev.CreatedAt
 	}
 	d.UpdatedAt = now
@@ -189,11 +206,19 @@ func (s *FileStore) SaveDraft(d Draft) (Draft, error) {
 }
 
 func (s *FileStore) DeleteDraft(id string) error {
+	return s.DeleteDraftAt(id, time.Time{})
+}
+
+// DeleteDraftAt optionally requires the draft's last update time to match.
+func (s *FileStore) DeleteDraftAt(id string, revision time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, ok := s.data.Drafts[id]
 	if !ok {
 		return ErrNotFound
+	}
+	if !revision.IsZero() && !revision.Equal(prev.UpdatedAt) {
+		return ErrDraftChanged
 	}
 	delete(s.data.Drafts, id)
 	if err := s.saveLocked(stateChange{draft: id}); err != nil {
