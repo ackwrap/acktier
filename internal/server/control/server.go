@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ackwrap/acktier/internal/owner"
 	"github.com/ackwrap/acktier/internal/server/acl"
 	"github.com/ackwrap/acktier/internal/server/ipam"
 	"github.com/ackwrap/acktier/internal/server/relay"
@@ -287,8 +288,11 @@ func (s *Server) buildNetMapFor(selfID types.NodeID) (types.NetMap, bool) {
 		return types.NetMap{}, false
 	}
 
-	compiledRules := acl.CompileForNode(pol, self, allPeerNodes)
-	if len(compiledRules) > 0 {
+	compiledRules, err := acl.Compile(pol, allPeerNodes)
+	if err != nil {
+		log.Printf("[control] ACL compilation failed: %v", err)
+		staticRules = []types.FilterRule{owner.DenyAll()}
+	} else if len(compiledRules) > 0 {
 		staticRules = compiledRules
 	}
 	var relays []types.RelayNode
@@ -929,6 +933,19 @@ func (s *Server) handleAdminPutACL(w http.ResponseWriter, r *http.Request) {
 	if err := acl.Validate(pol); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if len(pol.ACLs) > 0 {
+		records := s.store.ListNodes()
+		peers := make([]types.PeerNode, 0, len(records))
+		for _, record := range records {
+			if !record.Node.KeyRevoked {
+				peers = append(peers, record.Node)
+			}
+		}
+		if _, err := acl.Compile(pol, peers); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	if err := s.store.SetACLPolicy(pol); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

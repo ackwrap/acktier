@@ -8,10 +8,14 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 const (
@@ -24,14 +28,13 @@ type windowsTUN struct {
 	name string
 	mtu  int
 
-	dll                  *syscall.LazyDLL
-	procCloseAdapter     *syscall.LazyProc
-	procEndSession       *syscall.LazyProc
-	procGetReadWaitEvent *syscall.LazyProc
-	procReceivePacket    *syscall.LazyProc
-	procReleaseReceive   *syscall.LazyProc
-	procAllocateSend     *syscall.LazyProc
-	procSendPacket       *syscall.LazyProc
+	dll                *windows.DLL
+	procCloseAdapter   *windows.Proc
+	procEndSession     *windows.Proc
+	procReceivePacket  *windows.Proc
+	procReleaseReceive *windows.Proc
+	procAllocateSend   *windows.Proc
+	procSendPacket     *windows.Proc
 
 	adapter   uintptr
 	session   uintptr
@@ -42,6 +45,19 @@ type windowsTUN struct {
 	mu        sync.RWMutex
 }
 
+// loadWintun trusts the installation directory containing the running executable.
+func loadWintun(executable string) (*windows.DLL, error) {
+	if !filepath.IsAbs(executable) {
+		return nil, errors.New("Wintun requires an absolute executable path")
+	}
+	path := filepath.Join(filepath.Dir(executable), "wintun.dll")
+	handle, err := windows.LoadLibraryEx(path, 0, windows.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
+	if err != nil {
+		return nil, &os.PathError{Op: "load", Path: path, Err: err}
+	}
+	return &windows.DLL{Name: path, Handle: handle}, nil
+}
+
 // CreateOSDevice dynamically loads wintun.dll and creates an L3 Wintun adapter on Windows.
 func CreateOSDevice(ifName string, mtu int) (Device, error) {
 	ifName = interfaceNameOrDefault(ifName)
@@ -49,23 +65,49 @@ func CreateOSDevice(ifName string, mtu int) (Device, error) {
 		mtu = DefaultMTU
 	}
 
-	dll := syscall.NewLazyDLL("wintun.dll")
-	if err := dll.Load(); err != nil {
-		return nil, fmt.Errorf("load wintun.dll failed: %w (place wintun.dll next to acktierd.exe or run with -tun memory)", err)
+	nameUTF16, err := syscall.UTF16PtrFromString(ifName)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Wintun adapter name: %w", err)
 	}
-
-	procCreateAdapter := dll.NewProc("WintunCreateAdapter")
-	procStartSession := dll.NewProc("WintunStartSession")
-	procCloseAdapter := dll.NewProc("WintunCloseAdapter")
-	procEndSession := dll.NewProc("WintunEndSession")
-	procGetReadWaitEvent := dll.NewProc("WintunGetReadWaitEvent")
-	procReceivePacket := dll.NewProc("WintunReceivePacket")
-	procReleaseReceive := dll.NewProc("WintunReleaseReceivePacket")
-	procAllocateSend := dll.NewProc("WintunAllocateSendPacket")
-	procSendPacket := dll.NewProc("WintunSendPacket")
-
-	nameUTF16, _ := syscall.UTF16PtrFromString(ifName)
 	typeUTF16, _ := syscall.UTF16PtrFromString("AckTier")
+
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("locate Wintun installation: %w", err)
+	}
+	dll, err := loadWintun(executable)
+	if err != nil {
+		return nil, fmt.Errorf("%w (install trusted wintun.dll next to the executable or run with -tun memory)", err)
+	}
+	dev := &windowsTUN{name: ifName, mtu: mtu, dll: dll, closedCh: make(chan struct{})}
+	ready := false
+	defer func() {
+		if !ready {
+			_ = dev.Close()
+		}
+	}()
+
+	var procCreateAdapter, procStartSession, procGetReadWaitEvent *windows.Proc
+	for _, export := range []struct {
+		name string
+		proc **windows.Proc
+	}{
+		{"WintunCreateAdapter", &procCreateAdapter},
+		{"WintunStartSession", &procStartSession},
+		{"WintunGetReadWaitEvent", &procGetReadWaitEvent},
+		{"WintunCloseAdapter", &dev.procCloseAdapter},
+		{"WintunEndSession", &dev.procEndSession},
+		{"WintunReceivePacket", &dev.procReceivePacket},
+		{"WintunReleaseReceivePacket", &dev.procReleaseReceive},
+		{"WintunAllocateSendPacket", &dev.procAllocateSend},
+		{"WintunSendPacket", &dev.procSendPacket},
+	} {
+		proc, err := dll.FindProc(export.name)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Wintun exports: %w", err)
+		}
+		*export.proc = proc
+	}
 
 	adapter, _, err := procCreateAdapter.Call(
 		uintptr(unsafe.Pointer(nameUTF16)),
@@ -75,31 +117,18 @@ func CreateOSDevice(ifName string, mtu int) (Device, error) {
 	if adapter == 0 {
 		return nil, fmt.Errorf("WintunCreateAdapter failed (Administrator privileges required): %w", err)
 	}
+	dev.adapter = adapter
 
 	session, _, err := procStartSession.Call(adapter, wintunRingCapacity)
 	if session == 0 {
-		_, _, _ = procCloseAdapter.Call(adapter)
 		return nil, fmt.Errorf("WintunStartSession failed: %w", err)
 	}
+	dev.session = session
 
 	ev, _, _ := procGetReadWaitEvent.Call(session)
-
-	return &windowsTUN{
-		name:                 ifName,
-		mtu:                  mtu,
-		dll:                  dll,
-		procCloseAdapter:     procCloseAdapter,
-		procEndSession:       procEndSession,
-		procGetReadWaitEvent: procGetReadWaitEvent,
-		procReceivePacket:    procReceivePacket,
-		procReleaseReceive:   procReleaseReceive,
-		procAllocateSend:     procAllocateSend,
-		procSendPacket:       procSendPacket,
-		adapter:              adapter,
-		session:              session,
-		readEvent:            syscall.Handle(ev),
-		closedCh:             make(chan struct{}),
-	}, nil
+	dev.readEvent = syscall.Handle(ev)
+	ready = true
+	return dev, nil
 }
 
 func (d *windowsTUN) Name() string { return d.name }
@@ -199,6 +228,7 @@ func (d *windowsTUN) Close() error {
 			_, _, _ = d.procCloseAdapter.Call(d.adapter)
 			d.adapter = 0
 		}
+		_ = d.dll.Release()
 		d.mu.Unlock()
 	})
 	return nil

@@ -14,6 +14,26 @@
 - `cmd/acktierd`：客户端后台守护进程（跨平台虚拟网卡 TUN、X25519 + AES-256-GCM 端到端加密、UDP/TCP/QUIC/WSS 多协议传输、对等多跳网格中继、MagicDNS、Subnet Router / Exit Node）
 - `cmd/acktier`：跨平台命令行管理工具（节点操作与诊断、`owner` 本地签发和发布）
 
+## 预编译包安装
+
+中心与客户端分别提供 Windows、Linux 的 x86（32 位）、x86-64 和 ARM64 安装包。中心包提供 `acktier-server` 和所有者签发工具，客户端包提供 `acktierd` 和节点命令行，Windows 客户端包附有官方 Wintun。
+
+从 [GitHub Releases](https://github.com/ackwrap/acktier/releases) 下载对应版本，按照[安装与运维手册](docs/INSTALL.md)校验、解压、部署中心或加入已有组网。手册也包含自启、升级和卸载步骤。
+
+### 构建与发布
+
+在 GitHub 的 Actions 页面手动运行 **AckTier packages** 可获取测试包。每个系统和架构的 Actions 产物包含一份中心包和一份客户端包。
+
+正式发布前，将该版本的英文发布说明提交到 `.github/release-notes/`，例如 `.github/release-notes/v1.2.3.md`。将已验证的提交合入 `main`，再给该提交打标签并推送。以下以发布当前远端 `main` 的 `v1.2.3` 为例。
+
+```sh
+git fetch origin main
+git tag -a v1.2.3 FETCH_HEAD -m "AckTier v1.2.3"
+git push origin refs/tags/v1.2.3
+```
+
+工作流在测试和打包全部通过后创建 GitHub Release，并上传 `SHA256SUMS.txt`。`v1.2.3-rc.1` 这类标签会发布为预发行版本。
+
 ## 管理台前端 Mock 预览
 
 只改前端时，用 Node.js 22+ 从仓库根目录运行（无需安装 npm 依赖或启动 Go 中心）：

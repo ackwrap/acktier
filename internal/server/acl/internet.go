@@ -29,29 +29,43 @@ var nonInternet = []netip.Prefix{
 
 // Compile exclusions into the CIDRs themselves so older packet filters
 // cannot accidentally interpret an Internet grant as a wildcard.
-func internetPrefixes(nodes []types.PeerNode) []netip.Prefix {
+func internetPrefixes(nodes []types.PeerNode, work *compileWork) ([]netip.Prefix, error) {
 	// Start IPv6 at the current global unicast allocation, not ::/0, which
 	// would include unallocated space and special-purpose translation prefixes.
 	prefixes := []netip.Prefix{allIPv4, netip.MustParsePrefix("2000::/3")}
-	exclude := func(block netip.Prefix) {
+	exclude := func(block netip.Prefix) error {
+		if !work.take(len(prefixes)) {
+			return ErrTooComplex
+		}
 		block = block.Masked()
 		var next []netip.Prefix
 		for _, p := range prefixes {
 			next = subtractPrefix(next, p, block)
 		}
+		if len(next) > maxCompiledPrefixes || !work.take(max(0, len(next)-len(prefixes))) {
+			return ErrTooComplex
+		}
 		prefixes = next
+		return nil
 	}
 	for _, block := range nonInternet {
-		exclude(block)
+		if err := exclude(block); err != nil {
+			return nil, err
+		}
 	}
 	for _, n := range nodes {
+		if !work.take(1 + len(n.ApprovedRoutes)) {
+			return nil, ErrTooComplex
+		}
 		for _, route := range n.ApprovedRoutes {
 			if route.Bits() > 0 {
-				exclude(route)
+				if err := exclude(route); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
-	return prefixes
+	return prefixes, nil
 }
 
 func subtractPrefix(out []netip.Prefix, p, block netip.Prefix) []netip.Prefix {

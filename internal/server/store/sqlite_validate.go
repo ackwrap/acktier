@@ -46,6 +46,8 @@ func (s *FileStore) validatePersistentState() error {
 		if id == "" || draft.ID != id {
 			return errors.New("invalid draft record")
 		}
+		draft.valid = draft.Policy.Check() == nil
+		d.Drafts[id] = draft
 	}
 	if d.AdminPassword != nil && !d.AdminPassword.valid() {
 		return errors.New("invalid administrator password record")

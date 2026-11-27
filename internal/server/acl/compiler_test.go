@@ -1,12 +1,30 @@
 package acl_test
 
 import (
+	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/ackwrap/acktier/internal/server/acl"
 	"github.com/ackwrap/acktier/pkg/types"
 )
+
+func TestCompileReservesDefaultDropWithinRuleLimit(t *testing.T) {
+	entry := types.ACLGrantEntry{Src: []string{"*"}, Dst: []string{"*:443"}, Proto: "tcp"}
+	pol := types.ACLPolicy{ACLs: slices.Repeat([]types.ACLGrantEntry{entry}, acl.MaxRules-1)}
+
+	rules, err := acl.Compile(pol, nil)
+	if err != nil || len(rules) != acl.MaxRules || rules[len(rules)-1].Action != types.FilterDrop {
+		t.Fatalf("policy at the limit compiled to %d rules, error %v", len(rules), err)
+	}
+
+	pol.ACLs = append(pol.ACLs, entry)
+	rules, err = acl.Compile(pol, nil)
+	if !errors.Is(err, acl.ErrTooComplex) || rules != nil {
+		t.Fatalf("over-limit policy returned %d rules, error %v", len(rules), err)
+	}
+}
 
 func TestACLCompileTagsGroupsAndSubnets(t *testing.T) {
 	nodes := []types.PeerNode{
@@ -43,7 +61,10 @@ func TestACLCompileTagsGroupsAndSubnets(t *testing.T) {
 	if err := acl.Validate(pol); err != nil {
 		t.Fatalf("Validate failed: %v", err)
 	}
-	rules := acl.CompileForNode(pol, nodes[0], nodes)
+	rules, err := acl.Compile(pol, nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) < 3 {
 		t.Fatalf("expected compiled accept rules + trailing drop sentinel, got %d rules", len(rules))
 	}
@@ -63,7 +84,10 @@ func TestInternetGrantExcludesOverlayPrivateAndApprovedRoutes(t *testing.T) {
 	if err := acl.Validate(pol); err != nil {
 		t.Fatal(err)
 	}
-	rules := acl.CompileForNode(pol, types.PeerNode{}, nodes)
+	rules, err := acl.Compile(pol, nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rules) != 2 || rules[0].DstPortStart != 443 {
 		t.Fatalf("unexpected Internet policy: %d rules", len(rules))
 	}
@@ -99,7 +123,10 @@ func TestLabRangesCanBeGrantedExplicitly(t *testing.T) {
 	if err := acl.Validate(pol); err != nil {
 		t.Fatal(err)
 	}
-	rules := acl.CompileForNode(pol, types.PeerNode{}, nil)
+	rules, err := acl.Compile(pol, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, addr := range []string{"198.18.0.1", "203.0.113.1"} {
 		ip := netip.MustParseAddr(addr)
 		found := false

@@ -1,0 +1,196 @@
+name: AckTier packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+    tags: ['v*']
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/release-notes/**'
+      - 'scripts/package_release.py'
+      - 'docs/INSTALL.md'
+      - 'go.mod'
+      - 'go.sum'
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    name: Validate source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve package version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == tag ]]; then
+            version="$GITHUB_REF_NAME"
+            if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ ]]; then
+              echo '::error::Use a version tag such as v1.2.3 or v1.2.3-rc.1.'
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+              echo '::error::The release tag must point to a commit on main.'
+              exit 1
+            fi
+            if [[ ! -s ".github/release-notes/$version.md" ]]; then
+              echo "::error::Add English release notes at .github/release-notes/$version.md."
+              exit 1
+            fi
+          else
+            version="snapshot-${GITHUB_SHA:0:12}"
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test and vet
+        run: |
+          go test -count=1 ./...
+          go vet ./...
+
+  package:
+    name: Package ${{ matrix.os }}/${{ matrix.arch }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+        arch: [amd64, arm64, '386']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build center and client archives
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: python3 scripts/package_release.py "$VERSION" "$TARGET_OS" "$TARGET_ARCH"
+
+      - name: Smoke-test Linux executables
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          for bundle in center client; do
+            name="acktier-$bundle-$VERSION-linux-amd64"
+            tar -xzf "dist/$name.tar.gz" -C "$RUNNER_TEMP"
+          done
+          "$RUNNER_TEMP/acktier-center-$VERSION-linux-amd64/acktier-server" -h
+          "$RUNNER_TEMP/acktier-client-$VERSION-linux-amd64/acktierd" -h
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: acktier-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [validate, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: acktier-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: acktier-*
+          merge-multiple: true
+          path: dist
+
+      - name: Verify and publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          assets=()
+          for platform in linux windows; do
+            extension=tar.gz
+            if [[ "$platform" == windows ]]; then
+              extension=zip
+            fi
+            for arch in amd64 arm64 386; do
+              for bundle in center client; do
+                asset="acktier-$bundle-$VERSION-$platform-$arch.$extension"
+                if [[ ! -s "$asset" ]]; then
+                  echo "::error::Missing release asset $asset"
+                  exit 1
+                fi
+                assets+=("$asset")
+              done
+            done
+          done
+          sha256sum -- "${assets[@]}" > SHA256SUMS.txt
+
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::error::A release already exists for $VERSION."
+            exit 1
+          fi
+
+          notes="$RUNNER_TEMP/acktier-release-notes.md"
+          cat > "$notes" <<EOF
+          ## AckTier $VERSION
+
+          Download the center bundle for the coordination server and owner CLI, or the
+          client bundle for the node daemon and CLI. Bundles are available for Windows
+          and Linux on x86-64, ARM64 and 32-bit x86. Windows client bundles include
+          the signed Wintun DLL and its license.
+
+          Check your download against SHA256SUMS.txt and follow the
+          [installation and upgrade guide](https://github.com/$GH_REPO/blob/$VERSION/docs/INSTALL.md).
+          EOF
+          printf '\n' >> "$notes"
+          cat "$GITHUB_WORKSPACE/.github/release-notes/$VERSION.md" >> "$notes"
+          flags=()
+          if [[ "$VERSION" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$VERSION" "${assets[@]}" SHA256SUMS.txt \
+            --verify-tag --title "AckTier $VERSION" --notes-file "$notes" \
+            --generate-notes "${flags[@]}"

@@ -1,6 +1,7 @@
 package acl
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -9,6 +10,16 @@ import (
 
 	"github.com/ackwrap/acktier/pkg/types"
 )
+
+const (
+	MaxRules = 4096
+	// A signable snapshot fits in a 512 KiB payload; its serialized prefixes
+	// cannot approach this count, even at their shortest representation.
+	maxCompiledPrefixes = 128 * 1024
+	maxCompileWork      = 1 << 20
+)
+
+var ErrTooComplex = errors.New("ACL expansion exceeds the compilation limit")
 
 var (
 	allIPv4 = netip.MustParsePrefix("0.0.0.0/0")
@@ -74,7 +85,6 @@ func Validate(pol types.ACLPolicy) error {
 	}
 	return nil
 }
-
 func validatePrincipalSelector(sel string, pol types.ACLPolicy, isSrc bool) error {
 	sel = strings.TrimSpace(sel)
 	if sel == "*" {
@@ -134,17 +144,24 @@ func parseNodeIDSelector(sel string) (types.NodeID, bool) {
 	return types.NodeID(id), true
 }
 
-// CompileForNode compiles the global ACLPolicy into minimal FilterRules relevant to targetNode.
-// When pol.ACLs is empty, returns nil (signaling default allow-all overlay mode).
-// When pol.ACLs is non-empty, Zero-Trust default-deny applies unless an explicit rule matches!
-func CompileForNode(pol types.ACLPolicy, _ types.PeerNode, allNodes []types.PeerNode) []types.FilterRule {
+// Compile returns the ordered packet filter shared by all nodes. An empty ACL
+// returns nil so callers can choose the default for their authorization mode.
+// Overly complex policies return an error without exposing a partial filter.
+func Compile(pol types.ACLPolicy, allNodes []types.PeerNode) ([]types.FilterRule, error) {
 	if len(pol.ACLs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var out []types.FilterRule
-	internet := sync.OnceValue(func() []netip.Prefix { return internetPrefixes(allNodes) })
+	resolver := selectorResolver{policy: pol, nodes: allNodes, work: maxCompileWork}
+	resolver.internet = sync.OnceValues(func() ([]netip.Prefix, error) {
+		return internetPrefixes(allNodes, &resolver.work)
+	})
+	prefixesLeft := maxCompiledPrefixes - 4 // Reserve the final default-drop rule's prefixes.
 	for _, entry := range pol.ACLs {
+		if !resolver.work.take(1) {
+			return nil, ErrTooComplex
+		}
 		action := types.FilterAccept
 		if strings.EqualFold(strings.TrimSpace(entry.Action), "drop") {
 			action = types.FilterDrop
@@ -152,33 +169,46 @@ func CompileForNode(pol types.ACLPolicy, _ types.PeerNode, allNodes []types.Peer
 
 		protos, err := parseProtos(entry.Proto)
 		if err != nil {
-			continue
+			return nil, err
 		}
 
-		var srcPfx []netip.Prefix
+		var src prefixSet
 		for _, s := range entry.Src {
-			srcPfx = append(srcPfx, resolveSelector(s, pol, allNodes, true, internet)...)
+			if err := resolver.addSelector(&src, s, true); err != nil {
+				return nil, err
+			}
 		}
-		srcPfx = dedupPrefixes(srcPfx)
-		if len(srcPfx) == 0 {
+		if len(src.prefixes) == 0 {
 			continue
 		}
 
 		for _, rawDst := range entry.Dst {
 			sel, pRanges, err := splitDstAndPorts(rawDst)
 			if err != nil {
+				return nil, err
+			}
+			var dst prefixSet
+			if err := resolver.addSelector(&dst, sel, false); err != nil {
+				return nil, err
+			}
+			if len(dst.prefixes) == 0 {
 				continue
 			}
-			dstPfx := dedupPrefixes(resolveSelector(sel, pol, allNodes, false, internet))
-			if len(dstPfx) == 0 {
-				continue
+			if len(pRanges) > (MaxRules-1-len(out))/len(protos) {
+				return nil, ErrTooComplex
 			}
+			nRules := len(pRanges) * len(protos)
+			prefixesPerRule := len(src.prefixes) + len(dst.prefixes)
+			if nRules > prefixesLeft/prefixesPerRule {
+				return nil, ErrTooComplex
+			}
+			prefixesLeft -= nRules * prefixesPerRule
 			for _, proto := range protos {
 				for _, pr := range pRanges {
 					out = append(out, types.FilterRule{
 						Action:       action,
-						SrcPrefixes:  srcPfx,
-						DstPrefixes:  dstPfx,
+						SrcPrefixes:  src.prefixes,
+						DstPrefixes:  dst.prefixes,
 						IPProto:      proto,
 						DstPortStart: pr.start,
 						DstPortEnd:   pr.end,
@@ -194,7 +224,7 @@ func CompileForNode(pol types.ACLPolicy, _ types.PeerNode, allNodes []types.Peer
 		SrcPrefixes: []netip.Prefix{allIPv4, allIPv6},
 		DstPrefixes: []netip.Prefix{allIPv4, allIPv6},
 	})
-	return out
+	return out, nil
 }
 
 func parseProtos(p string) ([]uint8, error) {
@@ -247,7 +277,10 @@ func splitDstAndPorts(raw string) (selector string, ranges []portRange, err erro
 		return selector, []portRange{{0, 65535}}, nil
 	}
 
-	for _, part := range strings.Split(portSpec, ",") {
+	for part := range strings.SplitSeq(portSpec, ",") {
+		if len(ranges) == MaxRules-1 {
+			return "", nil, ErrTooComplex
+		}
 		part = strings.TrimSpace(part)
 		if dash := strings.IndexByte(part, '-'); dash > 0 {
 			p1, e1 := strconv.Atoi(part[:dash])
@@ -267,47 +300,119 @@ func splitDstAndPorts(raw string) (selector string, ranges []portRange, err erro
 	return selector, ranges, nil
 }
 
-func resolveSelector(sel string, pol types.ACLPolicy, nodes []types.PeerNode, isSrc bool, internet func() []netip.Prefix) []netip.Prefix {
+// compileWork also covers selectors that match nothing and duplicates that
+// never become output rules.
+type compileWork int
+
+func (w *compileWork) take(steps int) bool {
+	if steps > int(*w) {
+		return false
+	}
+	*w -= compileWork(steps)
+	return true
+}
+
+type prefixSet struct {
+	prefixes []netip.Prefix
+	seen     map[netip.Prefix]struct{}
+}
+
+func (s *prefixSet) add(p netip.Prefix) error {
+	if _, seen := s.seen[p]; seen || !p.IsValid() {
+		return nil
+	}
+	if len(s.prefixes) == maxCompiledPrefixes {
+		return ErrTooComplex
+	}
+	if s.seen == nil {
+		s.seen = make(map[netip.Prefix]struct{})
+	}
+	s.seen[p] = struct{}{}
+	s.prefixes = append(s.prefixes, p)
+	return nil
+}
+
+type selectorResolver struct {
+	policy   types.ACLPolicy
+	nodes    []types.PeerNode
+	work     compileWork
+	internet func() ([]netip.Prefix, error)
+}
+
+func (r *selectorResolver) addAll(out *prefixSet, prefixes []netip.Prefix) error {
+	if !r.work.take(len(prefixes)) {
+		return ErrTooComplex
+	}
+	for _, p := range prefixes {
+		if err := out.add(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *selectorResolver) addSelector(out *prefixSet, sel string, isSrc bool) error {
+	if !r.work.take(1 + len(sel)/64) {
+		return ErrTooComplex
+	}
 	sel = strings.TrimSpace(sel)
 	if sel == "*" {
-		return []netip.Prefix{allIPv4, allIPv6}
+		return r.addAll(out, []netip.Prefix{allIPv4, allIPv6})
 	}
 	if strings.EqualFold(sel, "autogroup:internet") {
 		if isSrc {
 			return nil
 		}
-		return internet()
+		prefixes, err := r.internet()
+		if err != nil {
+			return err
+		}
+		return r.addAll(out, prefixes)
 	}
 
-	if hostVal, ok := pol.Hosts[sel]; ok {
-		return parseIPOrPrefix(strings.TrimSpace(hostVal))
+	if hostVal, ok := r.policy.Hosts[sel]; ok {
+		return r.addAll(out, parseIPOrPrefix(strings.TrimSpace(hostVal)))
 	}
 
 	if strings.HasPrefix(sel, "group:") {
-		members := pol.Groups[sel]
-		var out []netip.Prefix
-		for _, m := range members {
-			if !strings.HasPrefix(m, "group:") {
-				out = append(out, resolveSelector(m, pol, nodes, isSrc, internet)...)
+		for _, member := range r.policy.Groups[sel] {
+			if strings.HasPrefix(strings.TrimSpace(member), "group:") {
+				return errors.New("nested ACL groups are not allowed")
+			}
+			if err := r.addSelector(out, member, isSrc); err != nil {
+				return err
 			}
 		}
-		return out
+		return nil
 	}
 
 	if strings.HasPrefix(sel, "tag:") {
-		var out []netip.Prefix
-		for _, n := range nodes {
-			if hasTag(n.Tags, sel) {
-				out = append(out, nodePrefixes(n, !isSrc)...)
+		if !r.work.take(len(r.nodes)) {
+			return ErrTooComplex
+		}
+		for _, n := range r.nodes {
+			for _, tag := range n.Tags {
+				if !r.work.take(1 + min(len(tag), len(sel))/64) {
+					return ErrTooComplex
+				}
+				if strings.EqualFold(tag, sel) {
+					if err := r.addNode(out, n, isSrc); err != nil {
+						return err
+					}
+					break
+				}
 			}
 		}
-		return out
+		return nil
 	}
 
 	if targetID, ok := parseNodeIDSelector(sel); ok {
-		for _, n := range nodes {
+		if !r.work.take(len(r.nodes)) {
+			return ErrTooComplex
+		}
+		for _, n := range r.nodes {
 			if n.ID == targetID {
-				return nodePrefixes(n, !isSrc)
+				return r.addNode(out, n, isSrc)
 			}
 		}
 		return nil
@@ -315,40 +420,47 @@ func resolveSelector(sel string, pol types.ACLPolicy, nodes []types.PeerNode, is
 
 	if strings.HasPrefix(strings.ToLower(sel), "nodekey:") {
 		if pk, err := types.ParsePublicKey(sel); err == nil && !pk.IsZero() {
-			for _, n := range nodes {
+			if !r.work.take(len(r.nodes)) {
+				return ErrTooComplex
+			}
+			for _, n := range r.nodes {
 				if n.NodeKey == pk {
-					return nodePrefixes(n, !isSrc)
+					return r.addNode(out, n, isSrc)
 				}
 			}
 		}
 		return nil
 	}
 
-	if pfxs := parseIPOrPrefix(sel); len(pfxs) > 0 {
-		return pfxs
-	}
-
 	// Self-reported node names / hostnames are intentionally never matched here.
-	return nil
+	return r.addAll(out, parseIPOrPrefix(sel))
 }
 
-func nodePrefixes(n types.PeerNode, includeApprovedSubnets bool) []netip.Prefix {
-	var out []netip.Prefix
+func (r *selectorResolver) addNode(out *prefixSet, n types.PeerNode, isSrc bool) error {
 	if n.IPv4.IsValid() {
-		out = append(out, netip.PrefixFrom(n.IPv4, 32))
+		if err := out.add(netip.PrefixFrom(n.IPv4, 32)); err != nil {
+			return err
+		}
 	}
 	if n.IPv6.IsValid() {
-		out = append(out, netip.PrefixFrom(n.IPv6, 128))
+		if err := out.add(netip.PrefixFrom(n.IPv6, 128)); err != nil {
+			return err
+		}
 	}
-	if includeApprovedSubnets {
+	if !isSrc {
+		if !r.work.take(len(n.ApprovedRoutes)) {
+			return ErrTooComplex
+		}
 		for _, rt := range n.ApprovedRoutes {
-			// Default routes (0.0.0.0/0, ::/0) represent Exit Node capability and require explicit `*` or `autogroup:internet` ACLs.
+			// Exit routes require an explicit wildcard or Internet grant.
 			if rt.Bits() > 0 && !types.OverlapsOverlayOrSpecial(rt) {
-				out = append(out, rt)
+				if err := out.add(rt); err != nil {
+					return err
+				}
 			}
 		}
 	}
-	return out
+	return nil
 }
 
 func parseIPOrPrefix(s string) []netip.Prefix {
@@ -363,25 +475,4 @@ func parseIPOrPrefix(s string) []netip.Prefix {
 		return []netip.Prefix{netip.PrefixFrom(ip, bits)}
 	}
 	return nil
-}
-
-func hasTag(tags []string, target string) bool {
-	for _, t := range tags {
-		if strings.EqualFold(t, target) {
-			return true
-		}
-	}
-	return false
-}
-
-func dedupPrefixes(in []netip.Prefix) []netip.Prefix {
-	seen := make(map[netip.Prefix]bool, len(in))
-	out := make([]netip.Prefix, 0, len(in))
-	for _, p := range in {
-		if p.IsValid() && !seen[p] {
-			seen[p] = true
-			out = append(out, p)
-		}
-	}
-	return out
 }

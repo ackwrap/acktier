@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"sort"
@@ -30,6 +31,22 @@ type Draft struct {
 	Policy      owner.Policy `json:"policy"`
 	CreatedAt   time.Time    `json:"createdAt"`
 	UpdatedAt   time.Time    `json:"updatedAt"`
+
+	// Computed from the same policy revision on save and on SQLite restore.
+	valid bool
+}
+
+type DraftSummary struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Note        string    `json:"note,omitempty"`
+	BaseVersion uint64    `json:"baseVersion"`
+	BaseStale   bool      `json:"baseStale"`
+	Valid       bool      `json:"valid"`
+	Members     int       `json:"members"`
+	ACLRules    int       `json:"aclRules"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // PublicationRecord keeps the exact signed bytes of a published version.
@@ -126,8 +143,43 @@ func (s *FileStore) DisableControllerDelegation() error {
 
 func cloneDraft(d Draft) Draft {
 	d.Policy.Members = slices.Clone(d.Policy.Members)
-	d.Policy.ACL.ACLs = slices.Clone(d.Policy.ACL.ACLs)
+	for i := range d.Policy.Members {
+		m := &d.Policy.Members[i]
+		m.Routes = slices.Clone(m.Routes)
+		m.Tags = slices.Clone(m.Tags)
+	}
+	pol := &d.Policy.ACL
+	pol.Hosts = maps.Clone(pol.Hosts)
+	pol.Groups = maps.Clone(pol.Groups)
+	for name, members := range pol.Groups {
+		pol.Groups[name] = slices.Clone(members)
+	}
+	pol.ACLs = slices.Clone(pol.ACLs)
+	for i := range pol.ACLs {
+		rule := &pol.ACLs[i]
+		rule.Src = slices.Clone(rule.Src)
+		rule.Dst = slices.Clone(rule.Dst)
+	}
+	d.Policy.DNS.Nameservers = slices.Clone(d.Policy.DNS.Nameservers)
 	return d
+}
+
+// DraftSummaries reads the latest draft metadata and the active version together.
+func (s *FileStore) DraftSummaries() []DraftSummary {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	active := s.owner.verified
+	out := make([]DraftSummary, 0, len(s.data.Drafts))
+	for _, d := range s.data.Drafts {
+		out = append(out, DraftSummary{
+			ID: d.ID, Name: d.Name, Note: d.Note, BaseVersion: d.BaseVersion,
+			BaseStale: active != nil && d.BaseVersion != active.Checkpoint.Version,
+			Valid:     d.valid, Members: len(d.Policy.Members), ACLRules: len(d.Policy.ACL.ACLs),
+			CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out
 }
 
 // ListDrafts returns drafts, most recently updated first.
@@ -165,6 +217,8 @@ func (s *FileStore) UpdateDraft(d Draft) (Draft, error) {
 }
 
 func (s *FileStore) saveDraft(d Draft, checkRevision bool) (Draft, error) {
+	d = cloneDraft(d)
+	d.valid = d.Policy.Check() == nil
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.data.Drafts == nil {
@@ -192,7 +246,6 @@ func (s *FileStore) saveDraft(d Draft, checkRevision bool) (Draft, error) {
 		d.CreatedAt = prev.CreatedAt
 	}
 	d.UpdatedAt = now
-	d = cloneDraft(d)
 	s.data.Drafts[d.ID] = d
 	if err := s.saveLocked(stateChange{draft: d.ID}); err != nil {
 		if existed {

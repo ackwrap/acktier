@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ackwrap/acktier/internal/owner"
+	"github.com/ackwrap/acktier/internal/server/acl"
 	"github.com/ackwrap/acktier/internal/server/store"
 	"github.com/ackwrap/acktier/pkg/types"
 )
@@ -199,6 +201,9 @@ func snapshotDiff(active *owner.Verified, next owner.Snapshot) policyDiff {
 }
 
 func friendlyPolicyError(err error) string {
+	if errors.Is(err, acl.ErrTooComplex) {
+		return "ACL 超过编译上限，请减少规则、端口或展开的成员与路由。"
+	}
 	msg := err.Error()
 	lower := strings.ToLower(msg)
 	if strings.Contains(lower, `proto "quic"`) || strings.Contains(lower, `proto "wss"`) {
@@ -262,9 +267,10 @@ func analyzePolicy(p owner.Policy, baseVersion uint64, active *owner.Verified, r
 			}
 		}
 	}
+	checkedGroups := make(map[string]bool)
 	for _, e := range p.ACL.ACLs {
 		for _, sel := range append(slices.Clone(e.Src), e.Dst...) {
-			checkSelector(sel, p.ACL, ids, keys, tags, hasExit, true, warnf)
+			checkSelector(sel, p.ACL, ids, keys, tags, hasExit, checkedGroups, warnf)
 		}
 		if strings.EqualFold(strings.TrimSpace(e.Action), "drop") {
 			continue
@@ -304,7 +310,7 @@ func analyzePolicy(p owner.Policy, baseVersion uint64, active *owner.Verified, r
 }
 
 func checkSelector(raw string, pol types.ACLPolicy, ids map[types.NodeID]bool, keys map[types.PublicKey]bool,
-	tags map[string]bool, hasExit, expandGroup bool, warnf func(string, ...any),
+	tags map[string]bool, hasExit bool, checkedGroups map[string]bool, warnf func(string, ...any),
 ) {
 	sel := strings.TrimSpace(raw)
 	lower := strings.ToLower(sel)
@@ -336,10 +342,11 @@ func checkSelector(raw string, pol types.ACLPolicy, ids map[types.NodeID]bool, k
 		if !hasExit {
 			warnf("规则引用了 autogroup:internet，但没有成员被批准为出口（0.0.0.0/0 或 ::/0）。")
 		}
-	case expandGroup && strings.HasPrefix(lower, "group:"):
+	case checkedGroups != nil && strings.HasPrefix(lower, "group:") && !checkedGroups[sel]:
+		checkedGroups[sel] = true
 		for _, m := range pol.Groups[sel] {
 			// Groups may contain principals but never other groups.
-			checkSelector(m, pol, ids, keys, tags, hasExit, false, warnf)
+			checkSelector(m, pol, ids, keys, tags, hasExit, nil, warnf)
 		}
 	}
 }
