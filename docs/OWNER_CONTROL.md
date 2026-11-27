@@ -59,6 +59,8 @@ acktier up --server http://127.0.0.1:8080 --auth-key "<PRE_AUTH_KEY>" --hostname
 
 在管理台的「入网申请」查看节点公钥、传输能力与申报路由，核对后可一键加入「ACL 与策略草稿」并导出完整 `policy.json`。如显式开启控制端 API 委托（在所有者电脑执行 `acktier owner controller-init --dir ./data/owner` 并在管理台「申请码与安全」上传 `controller-trust.json`），也可用 `acktier owner requests --server http://127.0.0.1:8081 --dir ./data/owner` 通过一次性挑战签名查询。
 
+控制端可用 `pkg/client.ControllerClient.Policy` 调用管理监听上的 `/api/v1/admin/policy/…`。这些接口与中心控制台共用生效策略查询、草稿和成员管理、ACL 校验编译、导出、验签预览、发布和历史版本读取。草稿修改、删除或导出时可传入上次读取的 `updatedAt`，草稿有更新时中心返回 `409 draft_changed`。发布仍需要在所有者设备签发的 `authorization.json`。
+
 从当前签名快照新建草稿时，中心只复制能重新编译出同一快照的策略源。中心没有相符草稿时，先导入所有者签发用的完整 `policy.json`；不会用空 ACL 代替。可在「ACL 规则」用表单编辑、调整匹配顺序，也可导入 ACL JSON。保存只修改所选草稿，不会直接激活规则。
 
 列表是**中心提供的未核验信息**。在签发前，必须通过节点本机显示的公钥或另一可信渠道确认公钥归属，不能按名称盲签。所有者准备或从管理台导出完整 `policy.json`，例如（替换两个公钥占位符）：
