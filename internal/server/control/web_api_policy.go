@@ -95,37 +95,8 @@ func (a *webAdmin) validatePolicyStateless(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, analyzePolicy(req.Policy, req.BaseVersion, verified, records))
 }
 
-type draftSummary struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Note        string    `json:"note,omitempty"`
-	BaseVersion uint64    `json:"baseVersion"`
-	BaseStale   bool      `json:"baseStale"`
-	Valid       bool      `json:"valid"`
-	Members     int       `json:"members"`
-	ACLRules    int       `json:"aclRules"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-}
-
-func summarizeDraft(d store.Draft, active *owner.Verified, records []store.StoredNode) draftSummary {
-	an := analyzePolicy(d.Policy, d.BaseVersion, active, records)
-	return draftSummary{
-		ID: d.ID, Name: d.Name, Note: d.Note, BaseVersion: d.BaseVersion,
-		BaseStale: an.BaseStale, Valid: an.Valid,
-		Members: len(d.Policy.Members), ACLRules: len(d.Policy.ACL.ACLs),
-		CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
-	}
-}
-
 func (a *webAdmin) listDrafts(w http.ResponseWriter, r *http.Request, _ string) {
-	_, verified, records := a.server.store.OwnerTopology()
-	drafts := a.server.store.ListDrafts()
-	out := make([]draftSummary, 0, len(drafts))
-	for _, d := range drafts {
-		out = append(out, summarizeDraft(d, verified, records))
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, a.server.store.DraftSummaries())
 }
 
 func defaultLiteralIPPort(addr string) string {

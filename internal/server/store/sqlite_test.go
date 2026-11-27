@@ -31,6 +31,32 @@ func openTestSQLite(t *testing.T, path string) *FileStore {
 	return st
 }
 
+func TestDraftSummaryTracksSavedPolicy(t *testing.T) {
+	st := openTestSQLite(t, filepath.Join(t.TempDir(), "private", "drafts.sqlite"))
+	d, err := st.SaveDraft(Draft{Name: "Office", Policy: owner.Policy{
+		ACL: types.ACLPolicy{ACLs: []types.ACLGrantEntry{
+			{Src: []string{"*"}, Dst: []string{"*:443"}},
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d.Policy.ACL.ACLs[0].Dst[0] = "unrecognized-name"
+	stored, err := st.GetDraft(d.ID)
+	drafts := st.DraftSummaries()
+	if err != nil || len(drafts) != 1 || !drafts[0].Valid || stored.Policy.ACL.ACLs[0].Dst[0] != "*:443" {
+		t.Fatalf("changing a returned draft affected the saved revision: %+v, %v", stored, err)
+	}
+	updated, err := st.UpdateDraft(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drafts := st.DraftSummaries(); len(drafts) != 1 || drafts[0].Valid || !drafts[0].UpdatedAt.Equal(updated.UpdatedAt) {
+		t.Fatalf("summary did not retain the editable invalid revision: %+v", drafts)
+	}
+}
+
 func authorizedEnvelope(t *testing.T, key ed25519.PrivateKey, version uint64, now time.Time) types.OwnerAuthorization {
 	t.Helper()
 	env, err := owner.Sign(owner.Snapshot{
@@ -137,6 +163,10 @@ func TestSQLitePersistsCenterStateWithoutPlaintextCredentials(t *testing.T) {
 	}
 	if d, err := st.GetDraft(draft.ID); err != nil || d.Name != draft.Name {
 		t.Fatal("lost draft after restart")
+	}
+	if drafts := st.DraftSummaries(); len(drafts) != 1 || drafts[0].ID != draft.ID ||
+		!drafts[0].Valid || !drafts[0].BaseStale {
+		t.Fatalf("draft summary after restart: %+v", drafts)
 	}
 	if inv, ok := st.Inventory(nodeKey); !ok || inv.Note != "test inventory" {
 		t.Fatal("lost manual inventory after restart")

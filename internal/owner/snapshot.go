@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ackwrap/acktier/internal/server/acl"
 	"github.com/ackwrap/acktier/pkg/types"
 )
 
@@ -60,7 +61,7 @@ func DenyAll() types.FilterRule {
 }
 
 func (s Snapshot) validate() error {
-	if s.Version == 0 || s.ExpiresAt.IsZero() || len(s.Members) > 512 || len(s.PacketFilter) > 4096 {
+	if s.Version == 0 || s.ExpiresAt.IsZero() || len(s.Members) > 512 || len(s.PacketFilter) > acl.MaxRules {
 		return errors.New("invalid authorization version, expiry, or size")
 	}
 	if len(s.PacketFilter) == 0 { // An empty filter in the legacy engine would allow all.

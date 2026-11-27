@@ -34,7 +34,10 @@ func (p Policy) Rules() ([]types.FilterRule, error) {
 	if err := acl.Validate(p.ACL); err != nil {
 		return nil, fmt.Errorf("invalid ACL: %w", err)
 	}
-	rules := acl.CompileForNode(p.ACL, types.PeerNode{}, p.Peers())
+	rules, err := acl.Compile(p.ACL, p.Peers())
+	if err != nil {
+		return nil, err
+	}
 	if len(rules) == 0 {
 		rules = []types.FilterRule{DenyAll()}
 	}

@@ -119,7 +119,7 @@ func (a *webAdmin) overview(w http.ResponseWriter, r *http.Request, s webSession
 		"authorization":  authMeta(verified, now),
 		"counts": map[string]int{
 			"requests": len(ownerRequests(verified, records)), "members": len(members), "membersOnline": online,
-			"records": len(records), "drafts": len(st.ListDrafts()), "keysActive": activeKeys,
+			"records": len(records), "drafts": len(st.DraftSummaries()), "keysActive": activeKeys,
 		},
 		"relay":       map[string]any{"clients": relayClients, "frames": frames, "bytes": bytes},
 		"revision":    a.server.revision.Load(),

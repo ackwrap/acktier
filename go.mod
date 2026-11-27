@@ -2,6 +2,8 @@ module github.com/ackwrap/acktier
 
 go 1.25.0
 
+toolchain go1.26.11
+
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/huin/goupnp v1.3.0
