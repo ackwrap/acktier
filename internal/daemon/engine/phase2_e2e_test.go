@@ -196,7 +196,23 @@ func (s *e2eStreamSwitch) DialFrom(host string) transport.StreamDialFunc {
 		}
 		cAddr := e2eMemAddr(fmt.Sprintf("%s:%d", host, s.port.Add(1)))
 		sAddr := e2eMemAddr(addr)
-		c, srv := net.Pipe()
+		// The WSS receive callback can reply synchronously. A TCP socket
+		// buffers those replies even when both peers write at the same time.
+		loopback, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		defer loopback.Close()
+		var dialer net.Dialer
+		c, err := dialer.DialContext(ctx, "tcp4", loopback.Addr().String())
+		if err != nil {
+			return nil, err
+		}
+		srv, err := loopback.Accept()
+		if err != nil {
+			_ = c.Close()
+			return nil, err
+		}
 		select {
 		case l.accept <- &e2ePipeConn{Conn: srv, l: sAddr, r: cAddr}:
 			return &e2ePipeConn{Conn: c, l: cAddr, r: sAddr}, nil
@@ -361,21 +377,24 @@ func TestPhase2StatefulNATHolePunchAndWSSMultiTransport(t *testing.T) {
 		t.Fatalf("corp-wss-2 Up: %v", err)
 	}
 
-	deadline = time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(engW1.Status().Peers) >= 3 && len(engW2.Status().Peers) >= 3 {
-			break
+	// A first probe can get a relay reply while the peer map or WSS handshake
+	// settles. Require an authenticated direct WSS reply within the deadline.
+	wssCtx, cancelWSS := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelWSS()
+	var lastPath string
+	for {
+		ping, err := engW1.PingPeer(wssCtx, "corp-wss-2")
+		if err == nil {
+			lastPath = ping.Via
+			if lastPath == "direct-wss" {
+				break
+			}
 		}
-		time.Sleep(25 * time.Millisecond)
-	}
-
-	// Ping from corp-wss-1 -> corp-wss-2 must establish direct-wss path even with UDP 100% disabled!
-	wssPing, err := engW1.PingPeer(ctx, "corp-wss-2")
-	if err != nil {
-		t.Fatalf("PingPeer corp-wss-2 failed: %v", err)
-	}
-	if wssPing.Via != "direct-wss" {
-		t.Fatalf("expected direct-wss transport when UDP is disabled, got %s", wssPing.Via)
+		select {
+		case <-wssCtx.Done():
+			t.Fatalf("expected direct-wss transport when UDP is disabled, last path %q: %v", lastPath, err)
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
 
 	// Verify encrypted L3 IPv4 tunnel packet rides over Direct WSS!
